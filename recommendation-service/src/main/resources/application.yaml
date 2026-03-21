@@ -1,0 +1,88 @@
+server:
+  port: 8004
+
+spring:
+  application:
+    name: recommendation-service
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:3306/ecommerce?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root123}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: 6379
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        import-check:
+          enabled: false
+
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.ecommerce.recommendation.entity
+  configuration:
+    map-underscore-to-camel-case: true
+
+services:
+  product:
+    url: ${PRODUCT_SERVICE_URL:http://localhost:8002}
+  rank:
+    url: ${RANK_SERVICE_URL:http://localhost:8010}
+    timeout-ms: ${RANK_TIMEOUT_MS:5000}
+    api-key: ${RANK_SERVICE_API_KEY:}
+
+recommendation:
+  recall:
+    cf-count: 80
+    popular-count: 40
+    category-count: 40
+    max-pool-size: 120
+  rerank:
+    enabled: ${RERANK_ENABLED:true}
+  rank:
+    min-feature-ratio: ${RANK_MIN_FEATURE_RATIO:0.5}
+  gray:
+    enabled: ${GRAY_ENABLED:true}
+    ratio: ${GRAY_RATIO:60}
+  diversity:
+    max-consecutive-same-category: ${DIVERSITY_MAX_CONSECUTIVE:2}
+  similarity-cache-version: ${SIMILARITY_CACHE_VERSION:v1}
+  popular:
+    time-decay-factor: ${POPULAR_DECAY_FACTOR:0.95}
+
+# 在线学习配置
+online-learning:
+  enabled: ${ONLINE_LEARNING_ENABLED:false}
+  interval-ms: ${ONLINE_LEARNING_INTERVAL_MS:1800000}
+  min-samples: ${ONLINE_LEARNING_MIN_SAMPLES:100}
+  max-samples: ${ONLINE_LEARNING_MAX_SAMPLES:5000}
+
+logging:
+  level:
+    com.ecommerce: debug
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+# ========== SpringDoc OpenAPI 配置 ==========
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+    try-it-out-enabled: true

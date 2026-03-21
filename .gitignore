@@ -1,0 +1,121 @@
+# =============================================
+# 环境变量 / 密钥（绝不能提交）
+# =============================================
+.env
+.env.local
+.env.*.local
+
+# =============================================
+# Java / Spring Boot
+# =============================================
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# Gradle (if any)
+.gradle/
+build/
+
+# IDE
+*.iml
+*.ipr
+*.iws
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# =============================================
+# Python (Recommendation Rank Service)
+# =============================================
+recommendation-rank-service/__pycache__/
+recommendation-rank-service/.pytest_cache/
+recommendation-rank-service/.venv/
+recommendation-rank-service/venv/
+recommendation-rank-service/env/
+recommendation-rank-service/*.pyc
+recommendation-rank-service/*.pyo
+recommendation-rank-service/.coverage
+recommendation-rank-service/htmlcov/
+recommendation-rank-service/dist/
+recommendation-rank-service/build/
+recommendation-rank-service/*.egg-info/
+recommendation-rank-service/.env
+recommendation-rank-service/.env.local
+
+# Trained model files (large binary, should be downloaded at runtime)
+recommendation-rank-service/models/
+*.pt
+*.pth
+*.onnx
+*.h5
+
+# =============================================
+# Node.js / Frontend
+# =============================================
+frontend/node_modules/
+frontend/.vite/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.nuxt/
+frontend/.output/
+frontend/.vercel/
+frontend/.error-locales/
+frontend/package-lock.json
+frontend/yarn.lock
+frontend/pnpm-lock.yaml
+frontend/.DS_Store
+frontend/*.local
+
+# =============================================
+# Infrastructure / Monitoring
+# =============================================
+infrastructure/mysql/data/
+infrastructure/redis/data/
+infrastructure/nacos/data/
+infrastructure/prometheus/data/
+infrastructure/grafana/data/
+
+# =============================================
+# Build Artifacts at Root Level
+# =============================================
+META-INF/
+
+# =============================================
+# Temporary / Debug Scripts
+# (delete these if they exist in your repo root)
+# =============================================
+check-*.ps1
+test-*.ps1
+gen-behaviors.ps1
+generate-data.ps1
+test_health.py
+test_integration.py
+test_integration2.py
+test-train.py
+test-load-data.py
+generated-products-*.sql
+load_test_results.json
+thesis_test_*.json
+
+# =============================================
+# Logs
+# =============================================
+*.log
+logs/
+*.log.*
+
+# =============================================
+# OS
+# =============================================
+Thumbs.db
+.DS_Store

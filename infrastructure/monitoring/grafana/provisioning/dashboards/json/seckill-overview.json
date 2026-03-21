@@ -1,0 +1,207 @@
+{
+  "id": null,
+  "uid": "seckill-overview",
+  "title": "Seckill Overview",
+  "tags": ["ecommerce", "seckill", "observability"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+        "query": "label_values(up{job=\"seckill-service\"}, instance)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 1,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Seckill Service Up",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "targets": [
+        {
+          "expr": "max(up{job=\"seckill-service\",instance=~\"$instance\"})",
+          "legendFormat": "up"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Seckill Start RPS (1m)",
+      "description": "基于实际 HTTP 请求计数的 QPS（非自定义指标）",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count{job=\"seckill-service\",uri=\"/api/seckill/start\"}[1m]))",
+          "legendFormat": "start rps"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Seckill 5xx Error Rate (5m)",
+      "description": "5xx 错误请求速率",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count{job=\"seckill-service\",uri=\"/api/seckill/start\",status=~\"5..\"}[5m])) or on() vector(0)",
+          "legendFormat": "5xx rps"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Avg Latency (ms, 5m)",
+      "description": "平均响应延迟（毫秒）",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "targets": [
+        {
+          "expr": "(sum(rate(http_server_requests_seconds_sum{job=\"seckill-service\",uri=\"/api/seckill/start\"}[5m])) / sum(rate(http_server_requests_seconds_count{job=\"seckill-service\",uri=\"/api/seckill/start\"}[5m]))) * 1000",
+          "legendFormat": "avg ms"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Throughput by Endpoint (RPS)",
+      "description": "各接口 QPS（基于 http_server_requests_seconds_count）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "targets": [
+        {
+          "expr": "sum by (uri) (rate(http_server_requests_seconds_count{job=\"seckill-service\"}[1m]))",
+          "legendFormat": "{{uri}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "HTTP Status Code Distribution",
+      "description": "HTTP 状态码分布",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(http_server_requests_seconds_count{job=\"seckill-service\",uri=\"/api/seckill/start\"}[1m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "JVM Heap Used (MB)",
+      "description": "JVM 堆内存使用量",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "targets": [
+        {
+          "expr": "sum(jvm_memory_used_bytes{job=\"seckill-service\",area=\"heap\"}) by (instance) / 1024 / 1024",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "JVM GC Pause (rate)",
+      "description": "GC 暂停时间和频率",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "targets": [
+        {
+          "expr": "sum(rate(jvm_gc_pause_seconds_sum{job=\"seckill-service\"}[5m]))",
+          "legendFormat": "gc pause sum/s"
+        },
+        {
+          "expr": "sum(rate(jvm_gc_pause_seconds_count{job=\"seckill-service\"}[5m]))",
+          "legendFormat": "gc count/s"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "P99 Latency by Endpoint (ms)",
+      "description": "P99 延迟（histogram_quantile）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket{job=\"seckill-service\",uri=\"/api/seckill/start\"}[5m])) by (le)) * 1000",
+          "legendFormat": "start P99"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{job=\"seckill-service\",uri=\"/api/seckill/start\"}[5m])) by (le)) * 1000",
+          "legendFormat": "start P95"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "JVM Thread Count",
+      "description": "活跃线程数",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "DS_PROMETHEUS" },
+      "targets": [
+        {
+          "expr": "sum(jvm_threads_live_threads{job=\"seckill-service\"})",
+          "legendFormat": "threads"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value"
+      }
+    }
+  ]
+}

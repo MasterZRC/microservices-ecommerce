@@ -1,0 +1,30 @@
+# DeepFM 模型配置
+# 变更配置后重启服务生效
+
+# 特征维度配置
+sparse_dims:
+  - 10    # user_view_bucket
+  - 10    # user_click_bucket
+  - 14    # user_active_days_bucket
+  - 10    # user_prefer_category
+  - 100   # item_category_id
+  - 50    # item_brand_id
+  - 10    # item_price_bucket
+  - 10    # item_sales_bucket
+
+dense_dim: 10          # user_dense(6) + item_dense(2) + cross(2)
+
+# 模型结构配置
+embedding_dim: 8       # 嵌入向量维度
+hidden_layers:          # DNN 隐藏层结构
+  - 128
+  - 64
+  - 32
+dropout_rate: 0.2       # Dropout 比率
+
+# 训练配置
+learning_rate: 0.001
+weight_decay: 0.00001   # L2 正则化
+
+# 模型加载路径（相对路径相对于 app/ 目录）
+model_path: models/deepfm_model.pt

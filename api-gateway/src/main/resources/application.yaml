@@ -1,0 +1,86 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        namespace: public
+      config:
+        import-check:
+          enabled: false
+    gateway:
+      discovery:
+        locator:
+          enabled: true
+          lower-case-service-id: true
+      routes:
+        - id: user-service
+          uri: ${USER_SERVICE_URL:http://localhost:8001}
+          predicates:
+            - Path=/api/user/**
+        - id: product-service
+          uri: ${PRODUCT_SERVICE_URL:http://localhost:8002}
+          predicates:
+            - Path=/api/product/**
+        - id: order-service
+          uri: ${ORDER_SERVICE_URL:http://localhost:8003}
+          predicates:
+            - Path=/api/order/**
+        - id: recommendation-service
+          uri: http://ecommerce-recommendation-service:8004
+          predicates:
+            - Path=/api/recommendation/**
+          filters:
+            - StripPrefix=0
+        - id: seckill-service
+          uri: ${SECKILL_SERVICE_URL:http://localhost:8005}
+          predicates:
+            - Path=/api/seckill/**
+          filters:
+            - name: RequestRateLimiter
+              args:
+                key-resolver: "#{@ipKeyResolver}"
+                redis-rate-limiter.replenishRate: ${SECKILL_RATE_LIMIT_REPLENISH:200}
+                redis-rate-limiter.burstCapacity: ${SECKILL_RATE_LIMIT_BURST:400}
+                redis-rate-limiter.requestedTokens: 1
+
+sentinel:
+  transport:
+    dashboard: localhost:8080
+  eager: true
+
+jwt:
+  secret: ${JWT_SECRET:changeme}
+
+logging:
+  level:
+    org.springframework.cloud.gateway: info
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+# ========== SpringDoc OpenAPI 配置 ==========
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+    try-it-out-enabled: true

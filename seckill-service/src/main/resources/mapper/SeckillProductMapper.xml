@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ecommerce.seckill.mapper.SeckillProductMapper">
+
+    <!-- 批量同步 Redis 库存到 MySQL（乐观锁版本，防止覆盖新库存） -->
+    <update id="batchSyncStock">
+        <foreach collection="items" item="item" separator=";">
+            UPDATE seckill_product
+            SET available_stock = #{item.availableStock}
+            WHERE id = #{item.id}
+              AND available_stock &gt;= 0
+        </foreach>
+    </update>
+
+</mapper>

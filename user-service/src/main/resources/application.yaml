@@ -1,0 +1,84 @@
+server:
+  port: 8001
+
+spring:
+  application:
+    name: user-service
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:docker}
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        enabled: true
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        enabled: true
+        import-check:
+          enabled: false
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:3306/ecommerce?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root123}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: 6379
+      database: 0
+      timeout: 5000
+
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.ecommerce.user.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: isDeleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+jwt:
+  secret: ${JWT_SECRET:changeme}
+  expiration: 86400000
+
+sentinel:
+  transport:
+    dashboard: localhost:8080
+
+logging:
+  level:
+    com.ecommerce: debug
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+# ========== SpringDoc OpenAPI 配置 ==========
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+    try-it-out-enabled: true
+  group-configs:
+    - group: 'user-service'
+      packages-to-scan: com.ecommerce.user.controller
+  security:
+    jwt:
+      enabled: true
+      header: Authorization
+      scheme: Bearer
+      bearer-format: JWT

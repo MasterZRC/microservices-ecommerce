@@ -1,0 +1,263 @@
+services:
+  # MySQL
+  mysql:
+    image: mysql:8.0
+    container_name: ecommerce-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      TZ: ${TZ}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./infrastructure/mysql/init:/docker-entrypoint-initdb.d
+    networks:
+      - ecommerce-network
+
+  # Redis
+  redis:
+    image: redis:7.2
+    container_name: ecommerce-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - ecommerce-network
+
+  # Nacos
+  nacos:
+    image: nacos/nacos-server:v2.3.0
+    container_name: ecommerce-nacos
+    restart: always
+    environment:
+      MODE: standalone
+      SPRING_DATASOURCE_PLATFORM: derby
+      JVM_XMS: 512m
+      JVM_XMX: 512m
+      JVM_XMN: 256m
+      NACOS_AUTH_ENABLE: ${NACOS_AUTH_ENABLE}
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+    networks:
+      - ecommerce-network
+
+  # User Service
+  user-service:
+    build:
+      context: .
+      dockerfile: user-service/Dockerfile
+    container_name: ecommerce-user-service
+    restart: always
+    ports:
+      - "8001:8001"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/ecommerce?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      REDIS_HOST: redis
+      NACOS_SERVER_ADDR: nacos:8848
+      ORDER_SERVICE_URL: http://order-service:8003
+      PRODUCT_SERVICE_URL: http://product-service:8002
+    depends_on:
+      - mysql
+      - redis
+      - nacos
+    networks:
+      - ecommerce-network
+
+  # Product Service
+  product-service:
+    build:
+      context: .
+      dockerfile: product-service/Dockerfile
+    container_name: ecommerce-product-service
+    restart: always
+    ports:
+      - "8002:8002"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/ecommerce?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      REDIS_HOST: redis
+      NACOS_SERVER_ADDR: nacos:8848
+    depends_on:
+      - mysql
+      - redis
+      - nacos
+    networks:
+      - ecommerce-network
+
+  # Order Service
+  order-service:
+    build:
+      context: .
+      dockerfile: order-service/Dockerfile
+    container_name: ecommerce-order-service
+    restart: always
+    ports:
+      - "8003:8003"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/ecommerce?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      REDIS_HOST: redis
+      NACOS_SERVER_ADDR: nacos:8848
+      PRODUCT_SERVICE_URL: http://product-service:8002
+    depends_on:
+      - mysql
+      - redis
+      - nacos
+    networks:
+      - ecommerce-network
+
+  # Recommendation Rank Service (Python)
+  recommendation-rank-service:
+    build:
+      context: ./recommendation-rank-service
+      dockerfile: Dockerfile
+    image: ecommerce-recommendation-rank-service:latest
+    container_name: ecommerce-recommendation-rank-service
+    restart: always
+    ports:
+      - "8010:8010"
+    environment:
+      PYTHONUNBUFFERED: "1"
+    networks:
+      - ecommerce-network
+
+  # Recommendation Service
+  recommendation-service:
+    build:
+      context: .
+      dockerfile: recommendation-service/Dockerfile
+    container_name: ecommerce-recommendation-service
+    restart: always
+    ports:
+      - "8004:8004"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/ecommerce?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      REDIS_HOST: redis
+      NACOS_SERVER_ADDR: nacos:8848
+      PRODUCT_SERVICE_URL: http://product-service:8002
+      RANK_SERVICE_URL: http://recommendation-rank-service:8010
+      GRAY_ENABLED: "true"
+      GRAY_RATIO: "10"
+      RERANK_ENABLED: "true"
+    depends_on:
+      - mysql
+      - redis
+      - nacos
+      - recommendation-rank-service
+    networks:
+      - ecommerce-network
+
+  # Seckill Service
+  seckill-service:
+    build:
+      context: .
+      dockerfile: seckill-service/Dockerfile
+    container_name: ecommerce-seckill-service
+    restart: always
+    ports:
+      - "8005:8005"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/ecommerce?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      REDIS_HOST: redis
+      NACOS_SERVER_ADDR: nacos:8848
+      ORDER_SERVICE_URL: http://order-service:8003
+      PRODUCT_SERVICE_URL: http://product-service:8002
+    depends_on:
+      - mysql
+      - redis
+      - nacos
+    networks:
+      - ecommerce-network
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: .
+      dockerfile: api-gateway/Dockerfile
+    container_name: ecommerce-api-gateway
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      NACOS_SERVER_ADDR: nacos:8848
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      USER_SERVICE_URL: http://user-service:8001
+      PRODUCT_SERVICE_URL: http://product-service:8002
+      ORDER_SERVICE_URL: http://order-service:8003
+      RECOMMENDATION_SERVICE_URL: http://recommendation-service:8004
+      SECKILL_SERVICE_URL: http://seckill-service:8005
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+    depends_on:
+      - nacos
+      - user-service
+      - product-service
+      - order-service
+      - recommendation-service
+      - seckill-service
+    networks:
+      - ecommerce-network
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: ecommerce-prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - api-gateway
+      - user-service
+      - product-service
+      - order-service
+      - recommendation-service
+      - seckill-service
+    networks:
+      - ecommerce-network
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: ecommerce-grafana
+    restart: always
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+    volumes:
+      - ./infrastructure/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - ecommerce-network
+
+  # Frontend - Running locally (not in Docker)
+  # To run locally: cd frontend && npm run dev
+
+volumes:
+  mysql-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  ecommerce-network:
+    driver: bridge
