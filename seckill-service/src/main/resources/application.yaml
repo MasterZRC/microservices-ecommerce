@@ -46,6 +46,16 @@ seckill:
     max-requests-per-second: 100
   sync:
     interval-ms: 30000
+  queue:
+    poll-interval-ms: 200
+    pending-poll-interval-ms: 1500
+    local-retry-interval-ms: 60000
+    max-retry: 5
+  strategy:
+    vip-stock-ratio: 0.3
+    vip-threshold: 100
+    max-requests-per-minute: 10
+    ip-max-accounts: 3
 
 bloomfilter:
   expected-insertions: 10000

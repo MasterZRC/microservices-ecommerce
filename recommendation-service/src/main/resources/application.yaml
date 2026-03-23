@@ -21,6 +21,14 @@ spring:
         server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
         import-check:
           enabled: false
+  # 异步任务配置
+  task:
+    execution:
+      pool:
+        core-size: 4
+        max-size: 8
+        queue-capacity: 100
+      thread-name-prefix: rec-async-
 
 mybatis-plus:
   mapper-locations: classpath:mapper/*.xml
@@ -33,47 +41,96 @@ services:
     url: ${PRODUCT_SERVICE_URL:http://localhost:8002}
   rank:
     url: ${RANK_SERVICE_URL:http://localhost:8010}
-    timeout-ms: ${RANK_TIMEOUT_MS:5000}
+    timeout-ms: ${RANK_TIMEOUT_MS:3000}
     api-key: ${RANK_SERVICE_API_KEY:}
 
 recommendation:
   recall:
-    cf-count: 80
-    popular-count: 40
-    category-count: 40
-    max-pool-size: 120
+    # 各召回通道数量配置
+    cf-count: 80           # ItemCF 协同过滤召回数量
+    popular-count: 40      # 热门召回数量
+    category-count: 40     # 同类目召回数量
+    content-count: 30       # 内容召回数量（冷启动用）
+    max-pool-size: 120      # 最大候选池大小
   rerank:
-    enabled: ${RERANK_ENABLED:true}
+    enabled: ${RERANK_ENABLED:false}
   rank:
     min-feature-ratio: ${RANK_MIN_FEATURE_RATIO:0.5}
   gray:
-    enabled: ${GRAY_ENABLED:true}
+    enabled: ${GRAY_ENABLED:false}
     ratio: ${GRAY_RATIO:60}
   diversity:
-    max-consecutive-same-category: ${DIVERSITY_MAX_CONSECUTIVE:2}
+    # 多样性控制配置
+    enabled: ${DIVERSITY_ENABLED:true}
+    mmr-lambda: ${DIVERSITY_MMR_LAMBDA:0.6}   # MMR 算法参数，0.6 表示 60% 权重给相关性，40% 给多样性
+    max-consecutive-same-category: 2            # 同一类目最多连续出现 2 个
+    max-consecutive-same-brand: 3               # 同一品牌最多连续出现 3 个
+    max-consecutive-same-price: 4                # 同一价格区间最多连续出现 4 个
   similarity-cache-version: ${SIMILARITY_CACHE_VERSION:v1}
   popular:
     time-decay-factor: ${POPULAR_DECAY_FACTOR:0.95}
+  cachePreheat:
+    # 缓存预热配置
+    enabled: ${CACHE_PREHEAT_ENABLED:true}
+    asyncPreheat: true
+    cron: "0 0 * * * ?"  # 每小时执行一次
+  # 重试配置
+  retry:
+    maxAttempts: 3
+    initialInterval: 100
+    multiplier: 2.0
+    maxInterval: 1000
+  # 降级配置
+  degrade:
+    enableFallback: true
+    fallbackToColdStart: true
+
+# 用户画像配置
+user:
+  profile:
+    enabled: ${USER_PROFILE_ENABLED:true}
+    active-days: 30
+    mysql-persist: true
+    refresh-cron: "0 0 3 * * ?"
+
+# 增量ItemCF配置
+incremental-itemcf:
+  enabled: ${INCREMENTAL_ITEMCF_ENABLED:true}
+  window-days: 7
+  batch-size: 100
+  merge-interval-ms: 300000
+  merge-cron-ms: 300000
+  min-interactions: 3
 
 # 在线学习配置
 online-learning:
-  enabled: ${ONLINE_LEARNING_ENABLED:false}
-  interval-ms: ${ONLINE_LEARNING_INTERVAL_MS:1800000}
-  min-samples: ${ONLINE_LEARNING_MIN_SAMPLES:100}
-  max-samples: ${ONLINE_LEARNING_MAX_SAMPLES:5000}
+  enabled: ${ONLINE_LEARNING_ENABLED:true}
+  interval-ms: 60000
+  batch-size: 100
+  min-samples: 50
+  explore-ratio: 0.1
+  consume-interval-ms: 60000
 
 logging:
   level:
-    com.ecommerce: debug
+    com.ecommerce: ${LOG_LEVEL:info}
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] [%X{requestId}] %-5level %logger{36} - %msg%n"
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,prometheus
+        include: health,info,metrics,prometheus,loggers
   endpoint:
     health:
       show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: ${spring.application.name}
 
 # ========== SpringDoc OpenAPI 配置 ==========
 springdoc:

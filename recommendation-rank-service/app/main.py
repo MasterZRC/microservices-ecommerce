@@ -20,6 +20,8 @@ from .schemas import (
 )
 from .model import get_ranker, DeepFMRanker
 from .features import FeatureEngine, SyntheticDataGenerator, RealDataGenerator
+from .model_attention import DeepFMAttentionRanker
+from .online_learning import get_online_learning_service, OnlineLearningService
 from .evaluation import (
     offline_evaluate_deepfm,
     offline_evaluate_itemcf,
@@ -80,22 +82,46 @@ app.add_middleware(
 _train_data = {}
 _val_data = {}
 
+# DeepFM-Attention 模型单例
+_attention_ranker: Optional[DeepFMAttentionRanker] = None
+_attention_model_path: str = "models/deepfm_attention.pt"
+_attention_embedding_dim: int = 16
+
+
+def _get_attention_ranker() -> DeepFMAttentionRanker:
+    """获取 DeepFM-Attention 排序器实例"""
+    global _attention_ranker
+    if _attention_ranker is None:
+        _attention_ranker = DeepFMAttentionRanker(
+            model_path=_attention_model_path,
+            embedding_dim=_attention_embedding_dim
+        )
+        loaded = _attention_ranker.load_model()
+        if not loaded:
+            logger.warning("DeepFM-Attention 模型初始化失败，将使用空模型")
+    return _attention_ranker
+
 
 @app.on_event("startup")
 async def startup_event():
     """服务启动时加载模型"""
     logger.info("正在加载 DeepFM 模型...")
     ranker = get_ranker()
-    logger.info(f"模型加载完成，设备: {ranker.device}")
+    logger.info(f"DeepFM 模型加载完成，设备: {ranker.device}")
+
+    logger.info("正在加载 DeepFM-Attention 模型...")
+    att_ranker = _get_attention_ranker()
+    logger.info(f"DeepFM-Attention 模型加载完成，设备: {att_ranker.device}")
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """健康检查"""
     ranker = get_ranker()
+    att_ranker = _get_attention_ranker()
     return HealthResponse(
         status="healthy",
-        model_loaded=ranker.is_loaded
+        model_loaded=ranker.is_loaded and att_ranker.is_loaded
     )
 
 
@@ -103,12 +129,22 @@ async def health_check():
 async def model_info():
     """获取模型信息"""
     ranker = get_ranker()
+    att_ranker = _get_attention_ranker()
     return {
-        "device": str(ranker.device),
-        "model_loaded": ranker.is_loaded,
-        "sparse_field_dims": ranker.sparse_field_dims,
-        "dense_dim": ranker.dense_dim,
-        "embedding_dim": ranker.embedding_dim,
+        "deepfm": {
+            "device": str(ranker.device),
+            "model_loaded": ranker.is_loaded,
+            "sparse_field_dims": ranker.sparse_field_dims,
+            "dense_dim": ranker.dense_dim,
+            "embedding_dim": ranker.embedding_dim,
+        },
+        "deepfm_attention": {
+            "device": str(att_ranker.device),
+            "model_loaded": att_ranker.is_loaded,
+            "sparse_field_dims": att_ranker.sparse_field_dims,
+            "dense_dim": att_ranker.dense_dim,
+            "embedding_dim": att_ranker.embedding_dim,
+        }
     }
 
 
@@ -176,8 +212,11 @@ async def rank_items(request: RankRequest, _auth: str = _require_api_key):
                       "请先调用商品服务获取真实商品数据后再提交排序请求。"
             )
 
-        # DeepFM 推理
-        scores = ranker.rank(user_features_dict, item_features)
+        # DeepFM-Attention 推理
+        att_ranker = _get_attention_ranker()
+        if not att_ranker.is_loaded:
+            raise HTTPException(status_code=503, detail="模型未加载")
+        scores = att_ranker.rank(user_features_dict, item_features, user_id=user_id)
 
         # 构建排序结果
         item_scores = list(zip([str(c) for c in candidates], scores))
@@ -285,11 +324,14 @@ async def rank_items_simple(request: Dict, _auth: str = _require_api_key):
                 }
 
 
-        ranker = get_ranker()
-        if not ranker.is_loaded:
-            raise HTTPException(status_code=503, detail="模型未加载")
-
-        scores = ranker.rank(user_features, item_features)
+        # 使用 DeepFM-Attention 模型排序（支持序列特征 + Attention 机制）
+        att_ranker = _get_attention_ranker()
+        if not att_ranker.is_loaded:
+            logger.warning("Attention 模型未加载，降级使用原始 ranker")
+            ranker = get_ranker()
+            scores = ranker.rank(user_features, item_features)
+        else:
+            scores = att_ranker.rank(user_features, item_features, user_id=user_id)
 
         # 排序
         item_scores = list(zip(candidates, scores))
@@ -817,6 +859,290 @@ async def evaluate_compare(request: OfflineCompareRequest, _auth: str = _require
         raise
     except Exception as e:
         logger.error(f"离线对比评测失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== 在线学习接口 ==========
+
+@app.on_event("startup")
+async def startup_online_learning():
+    """启动时初始化在线学习服务"""
+    try:
+        online_svc = get_online_learning_service()
+        # 初始化 DeepFM-Attention 模型（使用与主模型相同的配置）
+        attention_ranker = DeepFMAttentionRanker(
+            model_path="models/deepfm_attention.pt",
+            embedding_dim=16
+        )
+        if attention_ranker.load_model():
+            online_svc.initialize(attention_ranker.model, learning_rate=0.0001)
+            online_svc.start()
+            logger.info("在线学习服务启动成功")
+        else:
+            logger.warning("在线学习服务初始化失败：模型未找到，将在训练后自动启用")
+    except Exception as e:
+        logger.warning(f"在线学习服务启动失败: {e}")
+
+
+class OnlineExposureRequest(BaseModel):
+    """在线曝光事件请求"""
+    user_id: int
+    product_id: int
+    user_features: Dict
+    item_features: Dict
+
+
+class OnlineClickRequest(BaseModel):
+    """在线点击事件请求"""
+    user_id: int
+    product_id: int
+    user_features: Dict
+    item_features: Dict
+
+
+@app.post("/online/exposure", tags=["online_learning"])
+async def online_exposure(request: OnlineExposureRequest, _auth: str = _require_api_key):
+    """
+    接收曝光事件
+    曝光事件会加入在线学习的样本缓冲区，用于构建负样本
+    """
+    try:
+        online_svc = get_online_learning_service()
+        online_svc.record_exposure(
+            user_id=request.user_id,
+            product_id=request.product_id,
+            user_features=request.user_features,
+            item_features=request.item_features
+        )
+        return {"status": "ok", "message": "曝光事件已记录"}
+    except Exception as e:
+        logger.error(f"曝光事件处理失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/online/click", tags=["online_learning"])
+async def online_click(request: OnlineClickRequest, _auth: str = _require_api_key):
+    """
+    接收点击事件
+    点击事件会触发在线学习，立即更新模型
+    """
+    try:
+        online_svc = get_online_learning_service()
+        online_svc.record_click(
+            user_id=request.user_id,
+            product_id=request.product_id,
+            user_features=request.user_features,
+            item_features=request.item_features
+        )
+        return {"status": "ok", "message": "点击事件已记录"}
+    except Exception as e:
+        logger.error(f"点击事件处理失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/online/status", tags=["online_learning"])
+async def online_status(_auth: str = _require_api_key):
+    """
+    获取在线学习状态
+    返回缓冲区大小、训练批次统计等信息
+    """
+    try:
+        online_svc = get_online_learning_service()
+        return online_svc.get_status()
+    except Exception as e:
+        logger.error(f"在线学习状态查询失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/online/stop", tags=["online_learning"])
+async def online_stop(_auth: str = _require_api_key):
+    """停止在线学习"""
+    try:
+        online_svc = get_online_learning_service()
+        online_svc.stop()
+        return {"status": "ok", "message": "在线学习已停止"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/online/start", tags=["online_learning"])
+async def online_start(_auth: str = _require_api_key):
+    """重新启动在线学习"""
+    try:
+        online_svc = get_online_learning_service()
+        online_svc.start()
+        return {"status": "ok", "message": "在线学习已启动"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== DeepFM-Attention 专用排序接口 ==========
+
+class AttentionRankRequest(BaseModel):
+    """DeepFM-Attention 专用排序请求"""
+    user_id: int
+    candidates: List[int]
+    user_features: Dict
+    item_features: Dict
+
+
+@app.post("/rank/attention", response_model=RankResponse, tags=["attention"])
+async def rank_with_attention(request: AttentionRankRequest, _auth: str = _require_api_key):
+    """
+    使用 DeepFM-Attention 模型进行排序
+    支持用户序列特征，会根据 user_id 加载用户历史行为
+    """
+    try:
+        ranker = DeepFMAttentionRanker(
+            model_path="models/deepfm_attention.pt",
+            embedding_dim=16
+        )
+        if not ranker.load_model():
+            raise HTTPException(status_code=503, detail="DeepFM-Attention 模型未找到，请先训练模型")
+
+        item_features = {}
+        for item_id_str, feat in request.item_features.items():
+            if isinstance(feat, dict):
+                item_features[str(item_id_str)] = {
+                    "category_id": feat.get("category_id", 0),
+                    "brand_id": feat.get("brand_id", 0),
+                    "price_bucket": feat.get("price_bucket", 0),
+                    "sales_bucket": feat.get("sales_bucket", 0),
+                    "hot_score": feat.get("hot_score", 100.0),
+                    "price_ratio": feat.get("price_ratio", 0.5),
+                }
+
+        scores = ranker.rank(
+            user_features=request.user_features,
+            item_features=item_features,
+            user_id=request.user_id
+        )
+
+        item_scores = list(zip([str(c) for c in request.candidates], scores))
+        item_scores.sort(key=lambda x: x[1], reverse=True)
+
+        ranked_items = [
+            RankedItem(item_id=int(item_id), score=float(score))
+            for item_id, score in item_scores
+        ]
+
+        return RankResponse(
+            user_id=request.user_id,
+            ranked_items=ranked_items
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"DeepFM-Attention 排序失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== 曝光负采样训练接口 ==========
+
+class ExposureNegativeTrainRequest(BaseModel):
+    """曝光负采样训练请求"""
+    db_host: str = "localhost"
+    db_port: int = 3306
+    db_user: str = "root"
+    db_password: str = "root123"
+    db_name: str = "ecommerce"
+    min_interactions: int = 5
+    negative_per_positive: int = 3
+    exposure_negative_ratio: float = 0.5
+    epochs: int = 10
+    batch_size: int = 512
+    save_path: str = "models/deepfm_attention.pt"
+
+
+@app.post("/train/exposure-negative", response_model=TrainResponse, tags=["training"])
+async def train_with_exposure_negative(request: ExposureNegativeTrainRequest, _auth: str = _require_api_key):
+    """
+    使用曝光负采样的增强训练
+
+    特点：
+    - 负样本包含曝光未点击商品（高质量负样本）
+    - 支持 DeepFM-Attention 模型训练
+    """
+    try:
+        from .features import RealDataGenerator
+
+        db_config = {
+            "host": request.db_host,
+            "port": request.db_port,
+            "user": request.db_user,
+            "password": request.db_password,
+            "database": request.db_name
+        }
+
+        generator = RealDataGenerator(db_config)
+        user_features, item_features, labels = generator.load_training_data_with_exposure_negative(
+            min_interactions=request.min_interactions,
+            negative_per_positive=request.negative_per_positive,
+            exposure_negative_ratio=request.exposure_negative_ratio
+        )
+        generator.close()
+
+        if not labels:
+            raise HTTPException(status_code=400, detail="没有足够的训练数据")
+
+        # 划分训练集
+        import random
+        random.seed(42)
+        indices = list(range(len(labels)))
+        random.shuffle(indices)
+        split_idx = int(len(labels) * 0.8)
+
+        train_data = {
+            "user_features": [user_features[i] for i in indices[:split_idx]],
+            "item_features": [item_features[i] for i in indices[:split_idx]],
+            "labels": [labels[i] for i in indices[:split_idx]]
+        }
+        val_data = {
+            "user_features": [user_features[i] for i in indices[split_idx:]],
+            "item_features": [item_features[i] for i in indices[split_idx:]],
+            "labels": [labels[i] for i in indices[split_idx:]]
+        }
+
+        # 训练 DeepFM-Attention 模型
+        ranker = DeepFMAttentionRanker(
+            model_path=request.save_path,
+            embedding_dim=16
+        )
+        ranker.load_model()
+
+        history = ranker.train(
+            train_data=train_data,
+            val_data=val_data,
+            epochs=request.epochs,
+            batch_size=request.batch_size,
+            save_path=request.save_path
+        )
+
+        final_metrics = history["train_metrics"][-1] if history.get("train_metrics") else {}
+        epoch_history = []
+        for i, tm in enumerate(history.get("train_metrics", [])):
+            vm = history.get("val_metrics", [])[i] if i < len(history.get("val_metrics", [])) else {}
+            epoch_history.append({
+                "epoch": i + 1,
+                "train_loss": history.get("train_loss", [])[i] if i < len(history.get("train_loss", [])) else None,
+                "val_loss": history.get("val_loss", [])[i] if i < len(history.get("val_loss", [])) else None,
+                "train_auc": tm.get("auc", 0),
+                "train_logloss": tm.get("logloss", 0),
+                "val_auc": vm.get("auc", 0),
+            })
+
+        return TrainResponse(
+            status="success",
+            message=f"曝光负采样训练完成，已保存到 {request.save_path}",
+            metrics=final_metrics,
+            epoch_history=epoch_history
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"曝光负采样训练失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

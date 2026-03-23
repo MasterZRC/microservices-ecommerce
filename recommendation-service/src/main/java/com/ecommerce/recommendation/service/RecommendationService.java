@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import jakarta.annotation.PostConstruct;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
@@ -35,16 +36,67 @@ public class RecommendationService {
     private final RankClientService rankClientService;
     private final GrayReleaseService grayReleaseService;
     private final UserProfileService userProfileService;
+    private final IncrementalItemCFService incrementalItemCFService;
+    private final OnlineLearningService onlineLearningService;
+    private DiversityService diversityService;
+    private RecommendationMetricsService metricsService;
 
     @Value("${services.product.url:http://localhost:8002}")
     private String productServiceUrl;
 
+    @Value("${recommendation.diversity.enabled:true}")
+    private boolean diversityEnabled;
+
     @Value("${recommendation.diversity.max-consecutive-same-category:2}")
     private int maxConsecutiveSameCategory;
+
+    @Value("${recommendation.degrade.enableFallback:true}")
+    private boolean enableFallback;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setDiversityService(DiversityService diversityService) {
+        this.diversityService = diversityService;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setMetricsService(RecommendationMetricsService metricsService) {
+        this.metricsService = metricsService;
+    }
+
+    /**
+     * 服务启动时初始化用户画像
+     */
+    @PostConstruct
+    public void init() {
+        log.info("推荐服务启动，开始初始化...");
+        // 启动时预热：构建活跃用户画像
+        try {
+            List<UserBehavior> recentBehaviors = behaviorMapper.selectList(
+                new LambdaQueryWrapper<UserBehavior>()
+                    .ge(UserBehavior::getCreateTime, LocalDateTime.now().minusDays(30))
+                    .select(UserBehavior::getUserId)
+            );
+            Set<Long> activeUserIds = recentBehaviors.stream()
+                .map(UserBehavior::getUserId)
+                .collect(Collectors.toSet());
+            log.info("发现{}个活跃用户，开始构建画像...", activeUserIds.size());
+            for (Long userId : activeUserIds) {
+                try {
+                    userProfileService.buildFullProfile(userId);
+                } catch (Exception e) {
+                    log.warn("构建用户画像失败: userId={}", userId, e);
+                }
+            }
+            log.info("用户画像初始化完成");
+        } catch (Exception e) {
+            log.warn("初始化用户画像失败: {}", e.getMessage());
+        }
+    }
 
     private static final String SIMILARITY_KEY = "recommendation:similarity:" + ItemCFAlgorithm.SIMILARITY_CACHE_VERSION + ":";
     private static final String POPULAR_ITEMS_KEY = "recommendation:popular:";
     private static final String USER_BEHAVIOR_KEY = "recommendation:behavior:";
+    private static final String USER_REC_KEY = "recommendation:personal:";
     private static final Map<String, Integer> BEHAVIOR_WEIGHT = buildBehaviorWeight();
     private static final double RECENCY_DECAY = 0.94;
     private static final long MAX_DECAY_DAYS = 30;
@@ -78,69 +130,181 @@ public class RecommendationService {
 
         redisTemplate.delete(POPULAR_ITEMS_KEY + "all");
         redisTemplate.delete("recommendation:personal:" + userId);
+        redisTemplate.delete(SIMILARITY_KEY + "all");
 
-        // 更新用户画像标签
-        userProfileService.updateProfileOnBehavior(userId, productId, normalizedBehavior);
+        // 更新用户画像标签（增量更新）
+        try {
+            userProfileService.updateProfileOnBehavior(userId, productId, normalizedBehavior);
+        } catch (Exception e) {
+            log.warn("更新用户画像失败: userId={}, productId={}, error={}", userId, productId, e.getMessage());
+        }
+
+        // 在线学习：记录行为事件（实时反馈到推荐模型）
+        try {
+            List<Long> exposureItems = candidateRecallService.multiChannelRecall(userId);
+            onlineLearningService.recordBehaviorEvent(userId, productId, normalizedBehavior, exposureItems);
+        } catch (Exception e) {
+            log.warn("在线学习记录失败: userId={}, productId={}, error={}", userId, productId, e.getMessage());
+        }
+
+        // 增量ItemCF：记录交互（更新相似度矩阵）
+        try {
+            double behaviorWeight = BEHAVIOR_WEIGHT.getOrDefault(normalizedBehavior, 1);
+            incrementalItemCFService.recordIncrementalInteraction(userId, productId, normalizedBehavior, behaviorWeight);
+        } catch (Exception e) {
+            log.warn("增量ItemCF记录失败: userId={}, productId={}, error={}", userId, productId, e.getMessage());
+        }
     }
 
     /**
      * 获取个性化推荐（使用多路召回 + DeepFM重排）
+     * 
+     * 生产级改造：
+     * 1. 集成 Prometheus 指标埋点
+     * 2. 集成多样性控制（MMR 算法）
+     * 3. 集成多级降级策略
      */
     public List<Long> getPersonalizedRecommendations(Long userId, int limit) {
-        // 尝试从缓存获取
-        String cacheKey = "recommendation:personal:" + userId;
-        List<Long> cached = (List<Long>) redisTemplate.opsForValue().get(cacheKey);
-        if (cached != null && !cached.isEmpty()) {
-            return cached.stream().limit(limit).collect(Collectors.toList());
+        // 记录请求
+        if (metricsService != null) {
+            metricsService.recordRequest();
         }
 
-        // 使用多路召回获取候选商品
-        List<Long> recommendations = candidateRecallService.multiChannelRecall(userId);
+        io.micrometer.core.instrument.Timer.Sample timerSample = metricsService != null ? metricsService.startTimer() : null;
 
-        // 判断是否启用灰度发布（灰度用户使用 DeepFM 重排）
-        boolean useDeepFM = grayReleaseService.isGrayUser(userId);
-        String algorithm = useDeepFM ? "deepfm" : "itemcf";
-
-        // 记录曝光埋点
-        if (grayReleaseService.isGrayEnabled()) {
-            for (int i = 0; i < Math.min(recommendations.size(), 20); i++) {
-                grayReleaseService.recordExposure(userId, algorithm, i, recommendations.get(i));
-            }
-        }
-
-        // 如果是灰度用户且重排已启用，调用 DeepFM 排序服务
-        if (useDeepFM && rankClientService.isRankEnabled()) {
-            try {
-                // 构建用户特征
-                Map<String, Object> userFeatures = buildUserFeatures(userId);
-                
-                // 获取候选商品的详细信息（用于提取特征）
-                Map<String, Map<String, Object>> itemFeatures = buildItemFeaturesForCandidates(recommendations);
-                
-                // 调用排序服务
-                List<Long> rankedRecommendations = rankClientService.rank(
-                    userId, recommendations, userFeatures, itemFeatures
-                );
-                
-                if (!rankedRecommendations.isEmpty()) {
-                    recommendations = rankedRecommendations;
+        try {
+            // 尝试从缓存获取
+            String cacheKey = USER_REC_KEY + userId;
+            @SuppressWarnings("unchecked")
+            List<Long> cached = (List<Long>) redisTemplate.opsForValue().get(cacheKey);
+            if (cached != null && !cached.isEmpty()) {
+                List<Long> result = cached.stream().limit(limit).collect(Collectors.toList());
+                if (metricsService != null) {
+                    metricsService.recordSuccess();
+                    metricsService.recordFinalResultSize(result.size());
+                    if (timerSample != null) metricsService.stopRecommendationTimer(timerSample);
                 }
-            } catch (Exception e) {
-                log.warn("DeepFM排序失败，使用原始召回结果: {}", e.getMessage());
+                return result;
             }
-        }
 
-        // 缓存结果
-        if (!recommendations.isEmpty()) {
-            redisTemplate.opsForValue().set(cacheKey, recommendations, 1, TimeUnit.HOURS);
-        }
+            // 使用多路召回获取候选商品
+            List<Long> recommendations = candidateRecallService.multiChannelRecall(userId);
 
-        // 类目打散：避免同一类目连续出现超过 maxConsecutiveSameCategory 个
-        if (recommendations.size() > maxConsecutiveSameCategory) {
-            recommendations = shuffleByCategory(recommendations, buildItemCategoryMap());
-        }
+            // 如果召回为空且启用了降级，返回热门商品
+            if (recommendations.isEmpty() && enableFallback) {
+                log.warn("[降级] userId={} 召回结果为空，返回热门商品", userId);
+                if (metricsService != null) {
+                    metricsService.recordDegrade("cold_start");
+                }
+                recommendations = getColdStartRecommendations(limit);
+            }
 
-        return recommendations;
+            if (recommendations.isEmpty()) {
+                if (metricsService != null) {
+                    metricsService.recordFailure();
+                    if (timerSample != null) metricsService.stopRecommendationTimer(timerSample);
+                }
+                return Collections.emptyList();
+            }
+
+            // 判断是否启用灰度发布（灰度用户使用 DeepFM 重排）
+            boolean useDeepFM = grayReleaseService.isGrayUser(userId);
+            String algorithm = useDeepFM ? "deepfm" : "itemcf";
+
+            // 记录曝光埋点
+            if (grayReleaseService.isGrayEnabled()) {
+                for (int i = 0; i < Math.min(recommendations.size(), 20); i++) {
+                    grayReleaseService.recordExposure(userId, algorithm, i, recommendations.get(i));
+                }
+            }
+
+            // 如果是灰度用户且重排已启用，调用 DeepFM 排序服务
+            if (useDeepFM && rankClientService.isRankEnabled()) {
+                if (metricsService != null) {
+                    metricsService.recordRankRequest();
+                }
+                io.micrometer.core.instrument.Timer.Sample rankTimer = metricsService != null ? metricsService.startTimer() : null;
+
+                try {
+                    // 构建用户特征
+                    Map<String, Object> userFeatures = buildUserFeatures(userId);
+                    
+                    // 获取候选商品的详细信息（用于提取特征）
+                    Map<String, Map<String, Object>> itemFeatures = buildItemFeaturesForCandidates(recommendations);
+                    
+                    // 调用排序服务
+                    List<Long> rankedRecommendations = rankClientService.rank(
+                        userId, recommendations, userFeatures, itemFeatures
+                    );
+                    
+                    if (!rankedRecommendations.isEmpty()) {
+                        recommendations = rankedRecommendations;
+                        if (metricsService != null) {
+                            metricsService.recordRankSuccess();
+                        }
+                    }
+                } catch (Exception e) {
+                    log.warn("DeepFM排序失败，使用原始召回结果: {}", e.getMessage());
+                    if (metricsService != null) {
+                        metricsService.recordRankFailure();
+                        metricsService.recordRankFallback();
+                    }
+                } finally {
+                    if (rankTimer != null && metricsService != null) {
+                        metricsService.stopRankTimer(rankTimer);
+                    }
+                }
+            }
+
+            // 缓存结果（使用较长的过期时间）
+            if (!recommendations.isEmpty()) {
+                redisTemplate.opsForValue().set(cacheKey, recommendations, 2, TimeUnit.HOURS);
+            }
+
+            // 多样性打散（生产级核心功能）
+            if (diversityEnabled && diversityService != null && recommendations.size() > maxConsecutiveSameCategory) {
+                List<Long> beforeDiversity = new ArrayList<>(recommendations);
+                recommendations = diversityService.shuffleByMultiDimensional(recommendations);
+                // 【调试】追踪多样性前后的变化
+                Map<Long, Long> diversityItemCategoryMap = candidateRecallService.buildItemCategoryMap();
+                Map<Long, Long> beforeCatCount = countCategories(beforeDiversity, diversityItemCategoryMap);
+                Map<Long, Long> afterCatCount = countCategories(recommendations, diversityItemCategoryMap);
+                log.info("[多样性追踪] userId={}, 多样性前Top3类目={}, 多样性后Top3类目={}", 
+                         userId, getTop3Categories(beforeCatCount), getTop3Categories(afterCatCount));
+            }
+
+            // 【调试】在缓存和返回前记录最终推荐结果
+            if (log.isDebugEnabled()) {
+                log.debug("[最终推荐] userId={}, 推荐数量={}, 前10个商品ID={}", 
+                         userId, recommendations.size(), 
+                         recommendations.stream().limit(10).collect(Collectors.toList()));
+            }
+
+            // 记录最终结果
+            if (metricsService != null) {
+                metricsService.recordSuccess();
+                metricsService.recordFinalResultSize(recommendations.size());
+                if (timerSample != null) metricsService.stopRecommendationTimer(timerSample);
+            }
+
+            return recommendations.stream().limit(limit).collect(Collectors.toList());
+
+        } catch (Exception e) {
+            log.error("获取个性化推荐失败: userId={}", userId, e);
+            if (metricsService != null) {
+                metricsService.recordFailure();
+                if (timerSample != null) metricsService.stopRecommendationTimer(timerSample);
+            }
+            // 降级：返回热门商品
+            if (enableFallback) {
+                log.info("[降级] 发生异常，返回热门商品作为兜底: userId={}", userId);
+                if (metricsService != null) {
+                    metricsService.recordDegrade("exception_fallback");
+                }
+                return getColdStartRecommendations(limit);
+            }
+            return Collections.emptyList();
+        }
     }
 
     /**
@@ -493,23 +657,81 @@ public class RecommendationService {
     /**
      * 计算相似度矩阵
      */
-        private Map<Long, Map<Long, Double>> computeSimilarityMatrix(
+    private Map<Long, Map<Long, Double>> computeSimilarityMatrix(
             Map<Long, Map<Long, Double>> userItemScoreMatrix,
             Map<Long, Long> itemCategoryMap) {
 
         String cacheKey = SIMILARITY_KEY + "all";
-        Map<Long, Map<Long, Double>> cached = 
+        @SuppressWarnings("unchecked")
+        Map<Long, Map<Long, Double>> cached =
             (Map<Long, Map<Long, Double>>) redisTemplate.opsForValue().get(cacheKey);
 
         if (cached != null) {
-            return cached;
+            return convertToLongKeyMap(cached);
         }
 
+        log.info("[矩阵调试] 缓存未命中，重新计算相似度矩阵...");
         Map<Long, Map<Long, Double>> similarityMatrix =
             ItemCFAlgorithm.computeItemSimilarityWeighted(userItemScoreMatrix, itemCategoryMap);
 
+        log.info("[矩阵调试] 计算完成，矩阵外层key数={}", similarityMatrix.size());
+
         redisTemplate.opsForValue().set(cacheKey, similarityMatrix, 24, TimeUnit.HOURS);
         return similarityMatrix;
+    }
+
+    /**
+     * 将反序列化后key为String的Map转换为Long key的Map
+     * Redis默认序列化会将Long key转为String，查询时必须做类型对齐
+     */
+    @SuppressWarnings("unchecked")
+    private Map<Long, Map<Long, Double>> convertToLongKeyMap(Map<?, ?> map) {
+        if (map == null || map.isEmpty()) return new java.util.HashMap<>();
+        // 检查第一个key是否是Long类型（已对齐则直接返回）
+        Object firstKey = map.keySet().iterator().next();
+        if (firstKey instanceof Long) return (Map<Long, Map<Long, Double>>) map;
+
+        // 类型不对齐，需要逐个转换
+        Map<Long, Map<Long, Double>> result = new java.util.HashMap<>();
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            Long outerKey;
+            Object key = entry.getKey();
+            if (key instanceof String) {
+                outerKey = Long.parseLong((String) key);
+            } else {
+                outerKey = (Long) key;
+            }
+
+            Object innerObj = entry.getValue();
+            if (innerObj == null) {
+                result.put(outerKey, new java.util.HashMap<>());
+                continue;
+            }
+            Map<?, ?> innerMap = (Map<?, ?>) innerObj;
+            if (innerMap.isEmpty()) {
+                result.put(outerKey, new java.util.HashMap<>());
+                continue;
+            }
+            Object innerFirstKey = innerMap.keySet().iterator().next();
+            if (innerFirstKey instanceof Long) {
+                result.put(outerKey, (Map<Long, Double>) (Map<?, ?>) innerMap);
+            } else {
+                Map<Long, Double> convertedInner = new java.util.HashMap<>();
+                for (Map.Entry<?, ?> innerEntry : innerMap.entrySet()) {
+                    Long innerKey;
+                    Object ik = innerEntry.getKey();
+                    if (ik instanceof String) {
+                        innerKey = Long.parseLong((String) ik);
+                    } else {
+                        innerKey = (Long) ik;
+                    }
+                    convertedInner.put(innerKey, (Double) innerEntry.getValue());
+                }
+                result.put(outerKey, convertedInner);
+            }
+        }
+        log.info("[矩阵调试] String->Long 转换完成，新矩阵外层key数={}", result.size());
+        return result;
     }
 
     /**
@@ -535,6 +757,11 @@ public class RecommendationService {
                 .map(Map.Entry::getKey)
                 .limit(limit * 2)
                 .collect(Collectors.toList());
+
+            // user_behavior 无数据时，复用多路召回的兜底逻辑（从商品服务获取）
+            if (popularItems.isEmpty()) {
+                popularItems = candidateRecallService.recallByPopular(limit * 2);
+            }
 
             if (!popularItems.isEmpty()) {
                 redisTemplate.opsForValue().set(popKey, popularItems, 24, TimeUnit.HOURS);
@@ -564,18 +791,68 @@ public class RecommendationService {
 
     public List<Map<String, Object>> getPersonalizedProductDetails(Long userId, int limit) {
         List<Long> productIds = getPersonalizedRecommendations(userId, limit);
+        log.info("推荐候选商品IDs: {}", productIds.subList(0, Math.min(10, productIds.size())));
         List<Map<String, Object>> products = loadProductDetails(productIds, limit);
+        log.info("加载后的商品数量: {}, 前5个商品的ID: {}", 
+                products.size(), 
+                products.stream().limit(5).map(p -> p.get("id")).toList());
 
-        // 附加推荐理由
+        // 收集所有需要的商品ID（包括推荐商品和用户已交互商品）
+        Set<Long> allProductIds = new HashSet<>(productIds);
+        List<UserBehavior> userBehaviors = behaviorMapper.selectList(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<UserBehavior>()
+                .eq(UserBehavior::getUserId, userId)
+                .last("LIMIT 500")
+        );
+        for (UserBehavior b : userBehaviors) {
+            allProductIds.add(b.getProductId());
+        }
+
+        // 从商品服务批量获取所有商品的类目信息
+        // 【修复】优先使用全局类目映射，fallback到按ID查询
         Map<Long, Long> itemCategoryMap = buildItemCategoryMap();
-        Map<Long, Double> itemScores = getItemScores(userId);
-        Map<Long, String> explanations = generateExplanations(userId, productIds, itemCategoryMap, itemScores);
+        if (itemCategoryMap.isEmpty()) {
+            itemCategoryMap = buildItemCategoryMapForProducts(new ArrayList<>(allProductIds));
+        }
+        
+        // 统计推荐商品的类目分布
+        Map<Long, Long> categoryCount = new HashMap<>();
+        for (Map<String, Object> p : products) {
+            Object id = p.get("id");
+            if (id != null) {
+                Long catId = itemCategoryMap.get(Long.valueOf(id.toString()));
+                if (catId != null) {
+                    categoryCount.merge(catId, 1L, Long::sum);
+                }
+            }
+        }
+        log.info("推荐商品类目分布: {}", categoryCount);
+
+        // 获取用户行为特征和商品特征用于 DeepFM 排序
+        Map<String, Object> userFeatures = buildUserFeatures(userId);
+        Map<String, Map<String, Object>> itemFeatures = buildItemFeaturesForCandidates(productIds);
+
+        // 调用 DeepFM-Attention 排序服务获取 CTR 分数
+        Map<Long, Double> deepfmScores = rankClientService.rankWithScores(
+            userId, productIds, userFeatures, itemFeatures);
+
+        // 计算推荐理由（保留 ItemCF 用于解释）
+        Map<Long, Double> userItemScores = buildUserItemScoreMatrix()
+            .getOrDefault(userId, new HashMap<>());
+        Map<Long, Map<Long, Double>> globalSimilarityMatrix = computeSimilarityMatrix(
+                buildUserItemScoreMatrix(), itemCategoryMap);
+        Map<Long, Double> itemScores = getItemScores(userId, itemCategoryMap);
+        Map<Long, String> explanations = generateExplanations(
+            userId, productIds, itemCategoryMap, itemScores, userItemScores, globalSimilarityMatrix);
 
         for (Map<String, Object> product : products) {
             Object id = product.get("id");
             if (id != null) {
                 Long productId = Long.valueOf(id.toString());
+                // 使用 DeepFM-Attention CTR 分数作为主要排序分数
+                double score = deepfmScores.getOrDefault(productId, 0.0);
                 product.put("recommendation_reason", explanations.getOrDefault(productId, "热门推荐"));
+                product.put("score", score);
                 product.put("cf_score", itemScores.getOrDefault(productId, 0.0));
             }
         }
@@ -584,19 +861,86 @@ public class RecommendationService {
     }
 
     /**
-     * 获取推荐分数（内部使用）
+     * 根据商品ID列表批量获取类目信息
      */
-    private Map<Long, Double> getItemScores(Long userId) {
+    private Map<Long, Long> buildItemCategoryMapForProducts(List<Long> productIds) {
+        Map<Long, Long> categoryMap = new HashMap<>();
+        if (productIds == null || productIds.isEmpty()) {
+            return categoryMap;
+        }
+
+        try {
+            // 使用 GET 请求，通过 ids 参数传递商品ID
+            String idsParam = productIds.stream()
+                    .map(String::valueOf)
+                    .collect(Collectors.joining(","));
+            String url = UriComponentsBuilder.fromHttpUrl(productServiceUrl)
+                    .path("/api/product/batch")
+                    .queryParam("ids", idsParam)
+                    .build()
+                    .toUriString();
+
+            // 使用 GET 请求
+            @SuppressWarnings("unchecked")
+            Map<String, Object> response = restTemplate.getForObject(url, Map.class);
+
+            if (response != null) {
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> products = (List<Map<String, Object>>) response.get("products");
+                if (products != null) {
+                    for (Map<String, Object> product : products) {
+                        Object idObj = product.get("id");
+                        Object categoryIdObj = product.get("categoryId");
+                        if (idObj != null && categoryIdObj != null) {
+                            try {
+                                Long productId = Long.valueOf(idObj.toString());
+                                Long categoryId = Long.valueOf(categoryIdObj.toString());
+                                categoryMap.put(productId, categoryId);
+                            } catch (NumberFormatException ignored) {}
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("批量获取商品类目失败: {}", e.getMessage());
+        }
+
+        return categoryMap;
+    }
+
+    /**
+     * 计算类目亲和度分数
+     */
+    private double getCategoryAffinity(Long categoryId, Map<Long, Double> userItemScores, Map<Long, Long> itemCategoryMap) {
+        if (categoryId == null) return 0.0;
+        return userItemScores.entrySet().stream()
+                .filter(e -> categoryId.equals(itemCategoryMap.get(e.getKey())))
+                .mapToDouble(Map.Entry::getValue)
+                .sum();
+    }
+
+    /**
+     * 获取推荐分数（内部使用）
+     * @param userId 用户ID
+     * @param itemCategoryMap 商品-类目映射（传入以避免重复构建）
+     */
+    private Map<Long, Double> getItemScores(Long userId, Map<Long, Long> itemCategoryMap) {
         Map<Long, Map<Long, Double>> userItemScoreMatrix = buildUserItemScoreMatrix();
-        Map<Long, Long> itemCategoryMap = buildItemCategoryMap();
         Map<Long, Double> userItemScores = userItemScoreMatrix.getOrDefault(userId, new HashMap<>());
         Map<Long, Map<Long, Double>> similarityMatrix = computeSimilarityMatrix(userItemScoreMatrix, itemCategoryMap);
         Map<Long, Double> candidateScore = new HashMap<>();
+
+        // 【调试】统计：有多少个已交互商品有相似邻居
+        int itemsWithNeighbors = 0;
+        int totalSimEntries = 0;
 
         for (Map.Entry<Long, Double> interactedItem : userItemScores.entrySet()) {
             Long itemI = interactedItem.getKey();
             double historyWeight = Math.max(0.0, interactedItem.getValue());
             Map<Long, Double> simMap = similarityMatrix.getOrDefault(itemI, Collections.emptyMap());
+            totalSimEntries += simMap.size();
+            if (!simMap.isEmpty()) itemsWithNeighbors++;
+
             for (Map.Entry<Long, Double> simEntry : simMap.entrySet()) {
                 Long candidate = simEntry.getKey();
                 if (!userItemScores.keySet().contains(candidate)) {
@@ -604,6 +948,10 @@ public class RecommendationService {
                 }
             }
         }
+
+        log.info("[CF调试] userId={}, 已交互商品数={}, 有相似邻居的商品数={}, 总相似边数={}, 最终候选数={}",
+                 userId, userItemScores.size(), itemsWithNeighbors, totalSimEntries, candidateScore.size());
+
         return candidateScore;
     }
 
@@ -613,11 +961,15 @@ public class RecommendationService {
      * @param productIds 推荐商品列表
      * @param itemCategoryMap 商品-类目映射
      * @param itemScores 商品评分
+     * @param userItemScores 用户-商品评分矩阵
+     * @param similarityMatrix 全局相似度矩阵
      * @return 商品ID -> 推荐理由
      */
     private Map<Long, String> generateExplanations(Long userId, List<Long> productIds,
-                                                    Map<Long, Long> itemCategoryMap,
-                                                    Map<Long, Double> itemScores) {
+                                                   Map<Long, Long> itemCategoryMap,
+                                                   Map<Long, Double> itemScores,
+                                                   Map<Long, Double> userItemScores,
+                                                   Map<Long, Map<Long, Double>> similarityMatrix) {
         Map<Long, String> explanations = new LinkedHashMap<>();
 
         // 获取用户偏好类目和品牌
@@ -629,7 +981,6 @@ public class RecommendationService {
         );
 
         Map<Long, Double> categoryScores = new HashMap<>();
-        Map<Long, Double> brandScores = new HashMap<>();
         Set<Long> interactedItems = new HashSet<>();
 
         for (UserBehavior b : userBehaviors) {
@@ -649,50 +1000,47 @@ public class RecommendationService {
                 .map(Map.Entry::getKey)
                 .orElse(null);
 
-        // 获取相似商品信息
-        Map<Long, Set<Long>> userItemMatrix = new HashMap<>();
-        userItemMatrix.put(userId, interactedItems);
-        Map<Long, Map<Long, Double>> similarityMatrix =
-                ItemCFAlgorithm.computeItemSimilarity(userItemMatrix, itemCategoryMap);
-
         for (Long productId : productIds) {
             if (productId == null) continue;
 
             String reason;
             Long cat = itemCategoryMap.get(productId);
-            Double score = itemScores.getOrDefault(productId, 0.0);
+            Double cfScore = itemScores.getOrDefault(productId, 0.0);
 
-            // 策略1：同类目相似商品
-            Map<Long, Double> similarItems = similarityMatrix.get(productId);
-            if (similarItems != null && !similarItems.isEmpty()) {
-                Long mostSimilar = similarItems.entrySet().stream()
-                        .max(Map.Entry.comparingByValue())
-                        .map(Map.Entry::getKey)
-                        .orElse(null);
-
-                if (mostSimilar != null && cat != null && cat.equals(itemCategoryMap.get(mostSimilar))) {
-                    reason = "与你近期浏览的商品相似";
-                    explanations.put(productId, reason);
-                    continue;
-                }
+            // 策略1：协同过滤分数高 -> 个性化推荐
+            if (cfScore > 0) {
+                reason = "为你精选推荐";
+                explanations.put(productId, reason);
+                continue;
             }
 
-            // 策略2：偏好类目匹配
+            // 策略2：同类目相似商品（检查用户已交互商品与候选商品的相似度）
+            boolean hasSimilarity = false;
+            for (Long interacted : interactedItems) {
+                Map<Long, Double> simMap = similarityMatrix.get(interacted);
+                if (simMap != null) {
+                    Double sim = simMap.get(productId);
+                    if (sim != null && sim > 0) {
+                        hasSimilarity = true;
+                        break;
+                    }
+                }
+            }
+            if (hasSimilarity) {
+                reason = "与你近期浏览的商品相似";
+                explanations.put(productId, reason);
+                continue;
+            }
+
+            // 策略3：偏好类目匹配
             if (topCategory != null && cat != null && cat.equals(topCategory)) {
                 reason = "符合你偏好的商品类目";
                 explanations.put(productId, reason);
                 continue;
             }
 
-            // 策略3：热门商品
-            if (score == 0.0 || itemScores.isEmpty()) {
-                reason = "当前热门推荐";
-                explanations.put(productId, reason);
-                continue;
-            }
-
-            // 策略4：协同过滤推荐
-            reason = "为你精选推荐";
+            // 策略4：热门商品
+            reason = "当前热门推荐";
             explanations.put(productId, reason);
         }
 
@@ -792,6 +1140,20 @@ public class RecommendationService {
             return Collections.emptyList();
         }
 
+        log.info("[商品加载] 开始加载商品详情，请求数量={}", productIds.size());
+        
+        // 批量获取商品详情
+        Map<Long, Map<String, Object>> productInfoMap = getProductInfoMap(productIds);
+        log.info("[商品加载] 批量获取成功，商品数量={}", productInfoMap.size());
+        
+        // 统计缺失的商品
+        Set<Long> requestedIds = new HashSet<>(productIds);
+        Set<Long> foundIds = new HashSet<>(productInfoMap.keySet());
+        requestedIds.removeAll(foundIds);
+        if (!requestedIds.isEmpty()) {
+            log.warn("[商品加载] 无法获取商品详情的ID: {}", requestedIds);
+        }
+
         List<Map<String, Object>> products = new ArrayList<>();
         Set<Long> seen = new HashSet<>();
 
@@ -800,7 +1162,7 @@ public class RecommendationService {
                 continue;
             }
 
-            Map<String, Object> product = getProductDetail(productId);
+            Map<String, Object> product = productInfoMap.get(productId);
             if (product != null && product.get("id") != null) {
                 products.add(product);
             }
@@ -809,7 +1171,8 @@ public class RecommendationService {
                 break;
             }
         }
-
+        
+        log.info("[商品加载] 加载完成，返回数量={}", products.size());
         return products;
     }
 
@@ -910,6 +1273,23 @@ public class RecommendationService {
             }
         }
         return list;
+    }
+
+    private Map<Long, Long> countCategories(List<Long> productIds, Map<Long, Long> itemCategoryMap) {
+        Map<Long, Long> categoryCount = new HashMap<>();
+        for (Long itemId : productIds) {
+            Long cat = itemCategoryMap.getOrDefault(itemId, -1L);
+            categoryCount.merge(cat, 1L, Long::sum);
+        }
+        return categoryCount;
+    }
+
+    private String getTop3Categories(Map<Long, Long> categoryCount) {
+        return categoryCount.entrySet().stream()
+                .sorted(Map.Entry.<Long, Long>comparingByValue().reversed())
+                .limit(3)
+                .map(e -> "类目" + e.getKey() + "=" + e.getValue())
+                .collect(Collectors.joining(", "));
     }
 
     /**

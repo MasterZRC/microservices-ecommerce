@@ -60,11 +60,39 @@ public class CandidateRecallService {
     @Value("${recommendation.similarity-cache-version:v1}")
     private String similarityCacheVersion;
 
+    private RecommendationMetricsService metricsService;
+
     private static final String POPULAR_ITEMS_KEY = "recommendation:popular:";
     private static final String ITEM_CATEGORY_KEY = "recommendation:item:category:";
     private static final String ITEM_FEATURE_KEY = "recommendation:item:features:";
     private static final Map<String, Integer> BEHAVIOR_WEIGHT = buildBehaviorWeight();
     private static final long MAX_DECAY_DAYS = 30;
+
+    /**
+     * 注入指标服务
+     */
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setMetricsService(RecommendationMetricsService metricsService) {
+        this.metricsService = metricsService;
+    }
+
+    // ==================== 公共方法（供 DiversityService 使用） ====================
+
+    /**
+     * 获取商品服务 URL（供 DiversityService 调用）
+     */
+    public String getProductServiceUrl() {
+        return productServiceUrl;
+    }
+
+    /**
+     * 获取 RestTemplate（供 DiversityService 调用）
+     */
+    public RestTemplate getRestTemplate() {
+        return restTemplate;
+    }
+
+    // ==================== 多路召回主入口 ====================
 
     /**
      * 执行多路召回，返回合并后的候选商品列表
@@ -75,41 +103,177 @@ public class CandidateRecallService {
      * - recall_content: 基于标题 TF-IDF 的内容相似度召回（冷启动专用）
      */
     public List<Long> multiChannelRecall(Long userId) {
-        List<Long> cfCandidates = recallByItemCF(userId, cfRecallCount);
-        List<Long> popularCandidates = recallByPopular(popularRecallCount);
-        List<Long> categoryCandidates = recallByCategory(userId, categoryRecallCount);
+        return multiChannelRecall(userId, maxPoolSize);
+    }
 
-        // 合并去重
-        Set<Long> recallPool = new LinkedHashSet<>();
-        recallPool.addAll(cfCandidates);
-        recallPool.addAll(popularCandidates);
-        recallPool.addAll(categoryCandidates);
+    /**
+     * 执行多路召回（带召回数量参数）
+     * 
+     * 【重构版】分层召回 + 保护个性化：
+     * - L1 ItemCF召回：完全不过滤，保护用户个性化推荐
+     * - L2 同类目召回：基于用户偏好类目打分
+     * - L3 热门商品：只补充用户偏好类目，兜底全局热门
+     * - L4 内容召回：基于TF-IDF内容相似度（冷启动兜底）
+     * 
+     * 移除已交互商品的策略（重要！）：
+     * - 对于"购买"过的商品：强烈过滤（已满足需求）
+     * - 对于"加购/收藏"过的商品：谨慎过滤（可能还会买）
+     * - 对于"浏览/点击"过的商品：CF召回不过滤（看完还可能买）
+     */
+    public List<Long> multiChannelRecall(Long userId, int limit) {
+        io.micrometer.core.instrument.Timer.Sample timerSample = null;
+        if (metricsService != null) {
+            timerSample = metricsService.startTimer();
+        }
 
-        // 移除用户已交互的商品
-        Set<Long> userInteracted = getUserInteractedItems(userId);
-        recallPool.removeAll(userInteracted);
-
-        // 如果召回结果为空，使用热门商品兜底
-        if (recallPool.isEmpty()) {
-            log.info("多路召回结果为空，使用热门商品兜底");
-            List<Long> fallback = getColdStartFallback(maxPoolSize);
-            if (fallback != null && !fallback.isEmpty()) {
-                return fallback;
+        // 获取用户已交互商品（分层）
+        Map<Long, Set<String>> userInteractedMap = getUserInteractedItemsWithTypes(userId);
+        Set<Long> userInteracted = userInteractedMap.keySet();
+        Set<Long> userBought = new HashSet<>();
+        Set<Long> userCartFav = new HashSet<>();
+        for (Map.Entry<Long, Set<String>> entry : userInteractedMap.entrySet()) {
+            if (entry.getValue().contains("buy")) {
+                userBought.add(entry.getKey());
             }
-            return Collections.emptyList();
+            if (entry.getValue().contains("cart") || entry.getValue().contains("favorite")) {
+                userCartFav.add(entry.getKey());
+            }
         }
 
-        // 限制候选池大小
-        List<Long> result = recallPool.stream().limit(maxPoolSize).collect(Collectors.toList());
+        // 获取用户偏好类目（用于同类目召回和热门补充）
+        Long preferredCategory = getUserPreferredCategory(userId);
+        log.info("[多路召回] userId={}, 偏好类目={}", userId, preferredCategory);
 
-        // 双重保障：如果最终结果为空，强制使用冷启动兜底
+        // ===== L1 ItemCF召回 =====
+        // 【核心改进】CF召回不过滤任何商品（保护个性化）
+        // 因为CF是基于用户行为计算出来的相似商品，用户可能还会买
+        List<Long> cfCandidates = recallByItemCF(userId, cfRecallCount);
+        List<Long> cfFiltered = new ArrayList<>(cfCandidates);
+        // 只过滤用户已购买的商品（强烈需求已满足）
+        cfFiltered.removeAll(userBought);
+        log.info("[多路召回] CF召回={}, 过滤已购买后={}", cfCandidates.size(), cfFiltered.size());
+
+        // ===== L2 同类目召回 =====
+        // 基于用户偏好类目召回
+        // 【改进】只过滤已购买商品，保留加购/收藏商品（强购买意向）
+        List<Long> categoryCandidates = recallByCategorySmart(userId, preferredCategory, categoryRecallCount * 2);
+        List<Long> catFiltered = new ArrayList<>();
+        for (Long item : categoryCandidates) {
+            // 只过滤已购买商品，保留加购/收藏（用户可能还会买）
+            if (!userBought.contains(item)) {
+                catFiltered.add(item);
+            }
+        }
+        log.info("[多路召回] 同类目召回={}, 过滤已购买后={}", categoryCandidates.size(), catFiltered.size());
+
+        // ===== L3 热门商品（智能补充）=====
+        // 【核心改进】热门商品补充必须优先从用户偏好类目选择
+        List<Long> popularCandidates = recallByPopularSmart(preferredCategory, popularRecallCount * 2);
+        List<Long> popFiltered = new ArrayList<>();
+        for (Long item : popularCandidates) {
+            // 过滤已购买和已加购商品
+            if (!userBought.contains(item) && !userCartFav.contains(item)) {
+                popFiltered.add(item);
+            }
+        }
+        log.info("[多路召回] 热门召回={}, 过滤后={}", popularCandidates.size(), popFiltered.size());
+
+        // ===== L4 内容召回（TF-IDF冷启动兜底）=====
+        List<Long> contentCandidates = Collections.emptyList();
+        if (cfFiltered.isEmpty() && catFiltered.isEmpty() && popFiltered.isEmpty()) {
+            log.info("[多路召回] 所有召回渠道为空，启用内容召回兜底");
+            contentCandidates = recallByContent(userId, contentRecallCount);
+            if (metricsService != null) {
+                metricsService.recordRecallChannel("content", contentCandidates.size());
+            }
+        } else {
+            // 即使不是空，也获取一些内容召回候选作为补充
+            contentCandidates = recallByContent(userId, contentRecallCount);
+        }
+
+        // ===== 分层合并策略 =====
+        // 【重构】质量驱动的动态合并：每条召回渠道根据候选质量动态分配位置
+        // CF召回的候选（与用户历史相似）优先排在前面，热门/同类目兜底补充
+        List<Long> result = new ArrayList<>();
+        Set<Long> usedIds = new HashSet<>();
+
+        // 【改进】CF召回商品优先加入（它们是真正的个性化推荐）
+        for (Long item : cfFiltered) {
+            if (usedIds.contains(item)) continue;
+            result.add(item);
+            usedIds.add(item);
+        }
+
+        // 【改进】同类目+热门商品按质量评分混合插入
+        // 构建混合候选池：同类目×2权重，热门×1权重
+        List<ItemWithScore> mixedCandidates = new ArrayList<>();
+        for (Long item : catFiltered) {
+            if (!usedIds.contains(item)) {
+                mixedCandidates.add(new ItemWithScore(item, 2.0)); // 同类目高质量
+            }
+        }
+        for (Long item : popFiltered) {
+            if (!usedIds.contains(item)) {
+                mixedCandidates.add(new ItemWithScore(item, 1.0)); // 热门兜底
+            }
+        }
+        // 按质量分数降序插入
+        mixedCandidates.sort((a, b) -> Double.compare(b.score, a.score));
+        for (ItemWithScore iws : mixedCandidates) {
+            if (result.size() >= maxPoolSize) break;
+            if (!usedIds.contains(iws.itemId)) {
+                result.add(iws.itemId);
+                usedIds.add(iws.itemId);
+            }
+        }
+
+        // 如果还不够，补充内容召回
+        for (Long item : contentCandidates) {
+            if (result.size() >= maxPoolSize) break;
+            if (!usedIds.contains(item)) {
+                result.add(item);
+                usedIds.add(item);
+            }
+        }
+
+        // 【调试】打印合并后候选池的实际类目分布
+        if (log.isDebugEnabled()) {
+            Map<Long, Long> itemCategoryMap = buildItemCategoryMap();
+            Map<Long, Long> poolCategoryCount = new HashMap<>();
+            for (Long itemId : result) {
+                Long cat = itemCategoryMap.get(itemId);
+                if (cat == null) cat = -1L;
+                poolCategoryCount.merge(cat, 1L, Long::sum);
+            }
+            log.debug("[多路召回] userId={}, 合并后候选池类目分布={}", userId, poolCategoryCount);
+        }
+
+        // ===== 最终兜底：全局热门 =====
         if (result.isEmpty()) {
-            log.warn("所有召回渠道均无结果，返回空列表");
-            List<Long> fallback = getColdStartFallback(maxPoolSize);
-            return (fallback != null && !fallback.isEmpty()) ? fallback : Collections.emptyList();
+            log.info("[多路召回] 所有召回渠道为空，使用全局热门兜底");
+            if (metricsService != null) {
+                metricsService.recordDegrade("cold_start");
+            }
+            List<Long> fallback = recallByPopular(maxPoolSize);
+            if (timerSample != null && metricsService != null) {
+                metricsService.stopRecallTimer(timerSample);
+            }
+            return fallback.stream().limit(limit).collect(Collectors.toList());
         }
 
-        return result;
+        // 记录指标
+        log.info("[多路召回] userId={}, cf={}(过滤后{}), category={}(过滤后{}), popular={}(过滤后{}), content={}, 合并后={}",
+                userId, cfCandidates.size(), cfFiltered.size(), categoryCandidates.size(), catFiltered.size(), 
+                popularCandidates.size(), popFiltered.size(), contentCandidates.size(), result.size());
+        if (metricsService != null) {
+            metricsService.recordAllRecallChannels(cfFiltered.size(), catFiltered.size(), popFiltered.size(), contentCandidates.size());
+            metricsService.recordCandidatePoolSize(result.size());
+        }
+
+        if (timerSample != null && metricsService != null) {
+            metricsService.stopRecallTimer(timerSample);
+        }
+        return result.stream().limit(limit).collect(Collectors.toList());
     }
 
     /**
@@ -130,6 +294,78 @@ public class CandidateRecallService {
     }
 
     /**
+     * 获取用户已交互商品（带行为类型，用于精细化过滤）
+     * @return Map<商品ID, 行为类型集合>
+     */
+    private Map<Long, Set<String>> getUserInteractedItemsWithTypes(Long userId) {
+        if (userId == null) {
+            return Collections.emptyMap();
+        }
+        List<UserBehavior> behaviors = behaviorMapper.selectList(new LambdaQueryWrapper<UserBehavior>()
+                .eq(UserBehavior::getUserId, userId)
+                .select(UserBehavior::getProductId, UserBehavior::getBehaviorType));
+
+        Map<Long, Set<String>> result = new HashMap<>();
+        for (UserBehavior behavior : behaviors) {
+            result.computeIfAbsent(behavior.getProductId(), k -> new HashSet<>())
+                    .add(normalizeBehaviorType(behavior.getBehaviorType()));
+        }
+        return result;
+    }
+
+    /**
+     * 智能同类目召回
+     * @param userId 用户ID
+     * @param preferredCategory 用户偏好类目
+     * @param limit 召回数量
+     * @return 同类目热门商品
+     */
+    private List<Long> recallByCategorySmart(Long userId, Long preferredCategory, int limit) {
+        if (preferredCategory == null) {
+            return Collections.emptyList();
+        }
+        return getCategoryPopularProducts(preferredCategory, limit);
+    }
+
+    /**
+     * 智能热门商品召回
+     * 优先从用户偏好类目选择热门商品
+     * @param preferredCategory 用户偏好类目
+     * @param limit 召回数量
+     * @return 热门商品列表
+     */
+    private List<Long> recallByPopularSmart(Long preferredCategory, int limit) {
+        List<Long> allPopular = recallByPopular(limit * 2);
+        if (allPopular.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Map<Long, Long> itemCategoryMap = buildItemCategoryMap();
+        
+        // 优先从用户偏好类目选择
+        List<Long> preferred = new ArrayList<>();
+        List<Long> others = new ArrayList<>();
+        
+        for (Long itemId : allPopular) {
+            Long catId = itemCategoryMap.get(itemId);
+            if (catId != null && catId.equals(preferredCategory)) {
+                preferred.add(itemId);
+            } else {
+                others.add(itemId);
+            }
+        }
+
+        // 混合：70%偏好类目 + 30%其他类目（保持多样性）
+        List<Long> result = new ArrayList<>();
+        int prefCount = (int) (limit * 0.7);
+        result.addAll(preferred.stream().limit(prefCount).collect(Collectors.toList()));
+        if (result.size() < limit) {
+            result.addAll(others.stream().limit(limit - result.size()).collect(Collectors.toList()));
+        }
+        return result;
+    }
+
+    /**
      * 召回方式1：ItemCF 协同过滤召回
      */
     public List<Long> recallByItemCF(Long userId, int limit) {
@@ -141,6 +377,7 @@ public class CandidateRecallService {
         Map<Long, Long> itemCategoryMap = buildItemCategoryMap();
 
         Map<Long, Double> userItemScores = userItemScoreMatrix.getOrDefault(userId, new HashMap<>());
+        log.info("[CF召回] userId={}, userItemScores大小={}, matrix总用户数={}", userId, userItemScores.size(), userItemScoreMatrix.size());
         if (userItemScores.isEmpty()) {
             return Collections.emptyList();
         }
@@ -189,11 +426,55 @@ public class CandidateRecallService {
                 .limit(limit * 2)
                 .collect(Collectors.toList());
 
+        // 当 user_behavior 表无数据时，从商品服务按销量获取热门商品兜底
+        if (popularItems.isEmpty()) {
+            log.info("user_behavior 无数据，从商品服务获取热门兜底");
+            popularItems = fallbackToProductServicePopular(limit * 2);
+        }
+
         if (!popularItems.isEmpty()) {
             redisTemplate.opsForValue().set(popKey, popularItems, 1, TimeUnit.HOURS);
         }
 
         return popularItems.stream().limit(limit).collect(Collectors.toList());
+    }
+
+    /**
+     * 冷启动兜底：user_behavior 无数据时，从商品服务获取按销量排序的商品
+     */
+    private List<Long> fallbackToProductServicePopular(int limit) {
+        try {
+            String url = UriComponentsBuilder.fromHttpUrl(productServiceUrl)
+                    .path("/api/product/list")
+                    .queryParam("page", 1)
+                    .queryParam("pageSize", Math.max(limit, 100))
+                    .build()
+                    .toUriString();
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> response = restTemplate.getForObject(url, Map.class);
+            if (response == null) return Collections.emptyList();
+
+            Object productsObj = response.get("products");
+            if (productsObj instanceof List<?> products) {
+                return products.stream()
+                        .filter(p -> p instanceof Map)
+                        .map(p -> {
+                            Object id = ((Map<?, ?>) p).get("id");
+                            if (id instanceof Number) return ((Number) id).longValue();
+                            if (id != null) {
+                                try { return Long.parseLong(id.toString()); } catch (NumberFormatException ignored) {}
+                            }
+                            return null;
+                        })
+                        .filter(Objects::nonNull)
+                        .limit(limit)
+                        .collect(Collectors.toList());
+            }
+        } catch (Exception e) {
+            log.warn("从商品服务获取热门兜底失败: {}", e.getMessage());
+        }
+        return Collections.emptyList();
     }
 
     /**
@@ -448,18 +729,71 @@ public class CandidateRecallService {
 
     /**
      * 获取类目热门商品
+     * 【改进】直接从商品库查询同类目商品，不过滤已购买
+     * 对于强购买意向的用户（如加购物车），需要推荐同类目但未购买的商品
      */
     private List<Long> getCategoryPopularProducts(Long categoryId, int limit) {
-        List<Long> allPopular = recallByPopular(limit * 3);
-        Map<Long, Long> itemCategoryMap = buildItemCategoryMap();
+        // 如果用户偏好类目有效，直接查询商品服务获取该类目的商品
+        List<Long> result = new ArrayList<>();
+        
+        if (categoryId == null) {
+            return Collections.emptyList();
+        }
+        
+        try {
+            // 直接调用商品服务获取该类目的商品（不限销量排序）
+            String url = UriComponentsBuilder.fromHttpUrl(productServiceUrl)
+                    .path("/api/product/list")
+                    .queryParam("page", 1)
+                    .queryParam("pageSize", 100)
+                    .queryParam("categoryId", categoryId)
+                    .build()
+                    .toUriString();
 
-        return allPopular.stream()
-                .filter(itemId -> {
-                    Long itemCategory = itemCategoryMap.get(itemId);
-                    return itemCategory != null && itemCategory.equals(categoryId);
-                })
-                .limit(limit)
-                .collect(Collectors.toList());
+            @SuppressWarnings("unchecked")
+            Map<String, Object> response = restTemplate.getForObject(url, Map.class);
+            
+            if (response != null && response.get("products") instanceof List) {
+                List<Map<String, Object>> products = (List<Map<String, Object>>) response.get("products");
+                for (Map<String, Object> product : products) {
+                    Object idObj = product.get("id");
+                    if (idObj != null) {
+                        result.add(Long.valueOf(idObj.toString()));
+                        if (result.size() >= limit) {
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("获取类目商品列表失败: {}", e.getMessage());
+        }
+        
+        // 如果商品服务查询失败，fallback到热门商品
+        if (result.isEmpty()) {
+            List<Long> allPopular = recallByPopular(limit * 10);
+            Map<Long, Long> itemCategoryMap = buildItemCategoryMap();
+            
+            for (Long itemId : allPopular) {
+                Long itemCategory = itemCategoryMap.get(itemId);
+                if (itemCategory != null && itemCategory.equals(categoryId)) {
+                    result.add(itemId);
+                    if (result.size() >= limit) {
+                        break;
+                    }
+                }
+            }
+        }
+        
+        log.info("[同类目召回] 类目={}, 直接查询到商品数={}", categoryId, result.size());
+        return result;
+    }
+
+    /**
+     * 按指定类目召回热门商品（供其他服务使用，如增量ItemCF初始化）
+     */
+    public List<Long> recallByCategoryId(Long categoryId, int limit) {
+        return getCategoryPopularProducts(categoryId, limit);
     }
 
     /**
@@ -487,6 +821,8 @@ public class CandidateRecallService {
                 .orderByDesc(UserBehavior::getCreateTime)
                 .last("LIMIT 50000"));
 
+        log.info("[UserItemMatrix] 加载行为数={}, 矩阵用户数={}", behaviors.size(), matrix.size());
+
         LocalDateTime now = LocalDateTime.now();
         for (UserBehavior behavior : behaviors) {
             String behaviorType = normalizeBehaviorType(behavior.getBehaviorType());
@@ -499,17 +835,55 @@ public class CandidateRecallService {
                     .merge(behavior.getProductId(), finalScore, Double::sum);
         }
 
+        log.info("[UserItemMatrix] 构建完成，矩阵用户数={}", matrix.size());
         return matrix;
     }
 
     /**
      * 构建物品-类别映射（从商品服务获取）
+     * 【修复】确保从缓存加载时正确处理类型转换
      */
     public Map<Long, Long> buildItemCategoryMap() {
         String cacheKey = ITEM_CATEGORY_KEY + "all";
+        @SuppressWarnings("unchecked")
         Map<Long, Long> cached = (Map<Long, Long>) redisTemplate.opsForValue().get(cacheKey);
 
-        if (cached != null) {
+        if (cached != null && !cached.isEmpty()) {
+            // 检查缓存中的 key 类型，如果是 String 则转换为 Long
+            Map<Long, Long> normalizedMap = new HashMap<>();
+            boolean needsNormalization = false;
+            for (Map.Entry<?, ?> entry : cached.entrySet()) {
+                Object key = entry.getKey();
+                Object value = entry.getValue();
+                Long k = null;
+                Long v = null;
+                if (key instanceof Long) {
+                    k = (Long) key;
+                } else if (key instanceof String) {
+                    k = Long.valueOf((String) key);
+                    needsNormalization = true;
+                } else if (key instanceof Integer) {
+                    k = ((Integer) key).longValue();
+                    needsNormalization = true;
+                }
+                if (value instanceof Long) {
+                    v = (Long) value;
+                } else if (value instanceof String) {
+                    v = Long.valueOf((String) value);
+                    needsNormalization = true;
+                } else if (value instanceof Integer) {
+                    v = ((Integer) value).longValue();
+                    needsNormalization = true;
+                }
+                if (k != null && v != null) {
+                    normalizedMap.put(k, v);
+                }
+            }
+            if (needsNormalization) {
+                // 重新缓存规范化后的数据
+                redisTemplate.opsForValue().set(cacheKey, normalizedMap, 1, TimeUnit.HOURS);
+                return normalizedMap;
+            }
             return cached;
         }
 
@@ -522,12 +896,14 @@ public class CandidateRecallService {
                     .queryParam("pageSize", 1000)
                     .build()
                     .toUriString();
+            log.info("[类目映射] 开始从商品服务获取，URL={}", url);
 
             @SuppressWarnings("unchecked")
             Map<String, Object> response = restTemplate.getForObject(url, Map.class);
 
             if (response != null && response.get("products") instanceof List) {
                 List<Map<String, Object>> products = (List<Map<String, Object>>) response.get("products");
+                log.info("[类目映射] 收到商品数量={}", products.size());
                 for (Map<String, Object> product : products) {
                     Object idObj = product.get("id");
                     Object categoryIdObj = product.get("categoryId");
@@ -537,13 +913,17 @@ public class CandidateRecallService {
                         categoryMap.put(productId, categoryId);
                     }
                 }
+                log.info("[类目映射] 解析后有效映射数={}", categoryMap.size());
+            } else {
+                log.warn("[类目映射] 商品服务返回异常，response={}", response);
             }
         } catch (Exception e) {
-            log.warn("获取商品类目信息失败，使用空映射", e);
+            log.error("[类目映射] 获取商品类目信息失败: {}", e.getMessage());
         }
 
         if (!categoryMap.isEmpty()) {
             redisTemplate.opsForValue().set(cacheKey, categoryMap, 1, TimeUnit.HOURS);
+            log.info("[类目映射] 已缓存，有效映射数={}", categoryMap.size());
         }
 
         return categoryMap;
@@ -677,5 +1057,17 @@ public class CandidateRecallService {
         }
         long days = Math.max(0, Math.min(MAX_DECAY_DAYS, ChronoUnit.DAYS.between(behaviorTime, now)));
         return Math.pow(popularTimeDecayFactor, days);
+    }
+
+    /**
+     * 辅助类：带质量分数的商品（用于混合候选池排序）
+     */
+    private static class ItemWithScore {
+        final Long itemId;
+        final double score;
+        ItemWithScore(Long itemId, double score) {
+            this.itemId = itemId;
+            this.score = score;
+        }
     }
 }

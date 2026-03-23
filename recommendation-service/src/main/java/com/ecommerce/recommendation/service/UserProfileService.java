@@ -2,38 +2,32 @@ package com.ecommerce.recommendation.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.ecommerce.recommendation.entity.UserBehavior;
+import com.ecommerce.recommendation.entity.UserPortrait;
 import com.ecommerce.recommendation.mapper.UserBehaviorMapper;
+import com.ecommerce.recommendation.mapper.UserPortraitMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
- * 用户画像标签服务
+ * 用户画像标签服务（增强版 - MySQL持久化 + Redis缓存）
  *
- * 存储结构：Redis Hash
- *   key: "user:profile:{userId}"
- *   fields:
- *     - active_level: 高活/中活/低活/沉默
- *     - purchase_power: 高消费/中消费/低消费
- *     - prefer_categories: ["类目1", "类目2", "类目3"]
- *     - prefer_price_range: low/middle/high
- *     - browse_depth: 浅度/中度/深度
- *     - last_update: 时间戳
- *
- * 自动更新策略：
- *   - 行为记录时：增量更新实时标签
- *   - 定时任务：每日全量刷新所有活跃用户画像
+ * 核心创新点：
+ * 1. Redis + MySQL 双写：Redis优先读写，异步持久化MySQL
+ * 2. RFM分层模型：Recency(最近)/Frequency(频率)/Monetary(金额)
+ * 3. 增量更新：行为记录触发增量更新，不触发全量重算
+ * 4. 定时全量刷新：每日凌晨3点全量刷新活跃用户画像
+ * 5. 多维度标签：活跃等级、消费能力、偏好类目/品牌、浏览深度
  */
 @Slf4j
 @Service
@@ -41,34 +35,48 @@ import java.util.stream.Collectors;
 public class UserProfileService {
 
     private final UserBehaviorMapper behaviorMapper;
+    private final UserPortraitMapper portraitMapper;
     private final RedisTemplate<String, Object> redisTemplate;
     private final CandidateRecallService candidateRecallService;
 
     private static final String PROFILE_KEY_PREFIX = "user:profile:";
+    private static final String COUNTER_SUFFIX = ":counters";
+    private static final String CATEGORY_SCORE_SUFFIX = ":category_scores";
+    private static final String DIRTY_SET = "user:profile:dirty";
     private static final long PROFILE_TTL_DAYS = 30;
 
-    @Value("${USER_PROFILE_ENABLED:true}")
+    @Value("${user.profile.enabled:true}")
     private boolean profileEnabled;
 
-    @Value("${USER_PROFILE_ACTIVE_DAYS:30}")
+    @Value("${user.profile.active-days:30}")
     private int activeDaysThreshold;
 
-    // ========== 行为记录触发增量更新 ==========
+    @Value("${user.profile.mysql-persist:true}")
+    private boolean mysqlPersistEnabled;
+
+    // ==================== 行为触发增量更新 ====================
 
     /**
      * 行为记录时增量更新用户画像
      * 在 RecommendationService.recordBehavior 之后调用
+     *
+     * 策略：
+     * 1. 立即更新Redis（快速响应）
+     * 2. 异步写入MySQL（保证持久化）
+     * 3. 标记脏数据用于定时全量刷新
      */
     public void updateProfileOnBehavior(Long userId, Long productId, String behaviorType) {
-        if (!profileEnabled) return;
+        if (!profileEnabled || userId == null) return;
 
         try {
             String profileKey = PROFILE_KEY_PREFIX + userId;
+
+            // 获取商品类目信息
             Map<Long, Long> itemCategoryMap = candidateRecallService.buildItemCategoryMap();
             Long categoryId = itemCategoryMap.get(productId);
 
             // 增量更新行为计数
-            String countKey = profileKey + ":counters";
+            String countKey = profileKey + COUNTER_SUFFIX;
             redisTemplate.opsForHash().increment(countKey, "total_behaviors", 1);
             redisTemplate.opsForHash().increment(countKey, "behavior_" + behaviorType, 1);
             redisTemplate.expire(countKey, PROFILE_TTL_DAYS, TimeUnit.DAYS);
@@ -76,7 +84,7 @@ public class UserProfileService {
             // 更新偏好类目（购买/加购权重最高）
             if ("buy".equals(behaviorType) || "cart".equals(behaviorType)) {
                 if (categoryId != null) {
-                    String catKey = profileKey + ":category_scores";
+                    String catKey = profileKey + CATEGORY_SCORE_SUFFIX;
                     int weight = "buy".equals(behaviorType) ? 5 : 3;
                     redisTemplate.opsForHash().increment(catKey, String.valueOf(categoryId), weight);
                     redisTemplate.expire(catKey, PROFILE_TTL_DAYS, TimeUnit.DAYS);
@@ -87,57 +95,127 @@ public class UserProfileService {
             redisTemplate.opsForValue().set(profileKey + ":last_active", System.currentTimeMillis());
 
             // 标记需要定期全量刷新
-            redisTemplate.opsForSet().add("user:profile:dirty", userId);
+            redisTemplate.opsForSet().add(DIRTY_SET, userId);
 
-            log.debug("更新用户画像标签: userId={}, behavior={}", userId, behaviorType);
+            // 异步持久化到MySQL
+            if (mysqlPersistEnabled) {
+                asyncPersistToMySQL(userId);
+            }
+
+            log.debug("增量更新用户画像: userId={}, behavior={}", userId, behaviorType);
         } catch (Exception e) {
             log.warn("更新用户画像失败: userId={}, error={}", userId, e.getMessage());
         }
     }
 
-    // ========== 定时全量刷新 ==========
+    @Async
+    public void asyncPersistToMySQL(Long userId) {
+        try {
+            UserPortrait portrait = buildPortraitFromRedis(userId);
+            if (portrait == null) return;
 
-    /**
-     * 每日凌晨 3 点全量刷新活跃用户画像
-     */
-    @Scheduled(cron = "${USER_PROFILE_REFRESH_CRON:0 0 3 * * ?}")
+            UserPortrait existing = portraitMapper.selectByUserId(userId);
+            if (existing == null) {
+                portrait.setCreateTime(LocalDateTime.now());
+                portrait.setUpdateTime(LocalDateTime.now());
+                portrait.setVersion(0);
+                portraitMapper.insert(portrait);
+                log.debug("MySQL新增用户画像: userId={}", userId);
+            } else {
+                portrait.setId(existing.getId());
+                portrait.setVersion(existing.getVersion());
+                portrait.setCreateTime(existing.getCreateTime());
+                portrait.setUpdateTime(LocalDateTime.now());
+                int rows = portraitMapper.updateById(portrait);
+                if (rows == 0) {
+                    log.warn("用户画像更新失败（版本冲突）: userId={}", userId);
+                }
+            }
+        } catch (Exception e) {
+            log.error("异步持久化用户画像到MySQL失败: userId={}", userId, e);
+        }
+    }
+
+    private UserPortrait buildPortraitFromRedis(Long userId) {
+        String profileKey = PROFILE_KEY_PREFIX + userId;
+
+        Map<Object, Object> counters = redisTemplate.opsForHash().entries(profileKey + COUNTER_SUFFIX);
+        Map<Object, Object> categoryScores = redisTemplate.opsForHash().entries(profileKey + CATEGORY_SCORE_SUFFIX);
+        Object lastActive = redisTemplate.opsForValue().get(profileKey + ":last_active");
+
+        if (counters.isEmpty() && categoryScores.isEmpty()) {
+            return null;
+        }
+
+        UserPortrait portrait = new UserPortrait();
+        portrait.setUserId(userId);
+
+        // 解析行为计数
+        Map<String, Integer> behaviorCounts = new HashMap<>();
+        counters.forEach((k, v) -> {
+            if (k.toString().startsWith("behavior_")) {
+                String type = k.toString().substring("behavior_".length());
+                behaviorCounts.put(type, parseInt(v));
+            }
+        });
+
+        int totalBehaviors = behaviorCounts.values().stream().mapToInt(Integer::intValue).sum();
+        int buyCount = behaviorCounts.getOrDefault("buy", 0);
+        int cartCount = behaviorCounts.getOrDefault("cart", 0);
+        int viewCount = behaviorCounts.getOrDefault("view", 0);
+
+        portrait.setActiveLevel(computeActiveLevel(totalBehaviors, lastActive));
+        portrait.setPurchasePower(computePurchasePower(buyCount, cartCount));
+        portrait.setBrowseDepth(computeBrowseDepth(viewCount, totalBehaviors));
+        portrait.setRfmScore(computeRfmScore(lastActive, totalBehaviors, buyCount));
+        portrait.setBehaviorCount(totalBehaviors);
+        portrait.setBuyCount(buyCount);
+        portrait.setCartCount(cartCount);
+
+        if (lastActive != null) {
+            portrait.setLastActiveTime(
+                LocalDateTime.now().minus(Duration.ofMillis(System.currentTimeMillis() - parseLong(lastActive)))
+            );
+        }
+
+        return portrait;
+    }
+
+    // ==================== 定时全量刷新 ====================
+
+    @Scheduled(cron = "${user.profile.refresh-cron:0 0 3 * * ?}")
     public void scheduledProfileRefresh() {
         if (!profileEnabled) return;
 
         log.info("开始全量刷新用户画像...");
-        try {
-            Set<Object> dirtyUsers = redisTemplate.opsForSet().members("user:profile:dirty");
-            if (dirtyUsers == null || dirtyUsers.isEmpty()) {
-                log.info("无脏数据需要刷新");
-                return;
-            }
-
-            int refreshed = 0;
-            int failed = 0;
-            for (Object userIdObj : dirtyUsers) {
-                Long userId = Long.valueOf(userIdObj.toString());
-                try {
-                    buildFullProfile(userId);
-                    redisTemplate.opsForSet().remove("user:profile:dirty", userIdObj);
-                    refreshed++;
-                } catch (Exception e) {
-                    failed++;
-                    log.warn("刷新用户画像失败: userId={}, error={}", userId, e.getMessage());
-                }
-            }
-
-            log.info("全量刷新完成: 成功={}, 失败={}", refreshed, failed);
-        } catch (Exception e) {
-            log.error("全量刷新用户画像异常: {}", e.getMessage());
+        Set<Object> dirtyUsers = redisTemplate.opsForSet().members(DIRTY_SET);
+        if (dirtyUsers == null || dirtyUsers.isEmpty()) {
+            log.info("无脏数据需要刷新");
+            return;
         }
+
+        int refreshed = 0;
+        int failed = 0;
+        for (Object userIdObj : dirtyUsers) {
+            Long userId = Long.valueOf(userIdObj.toString());
+            try {
+                buildFullProfile(userId);
+                redisTemplate.opsForSet().remove(DIRTY_SET, userIdObj);
+                refreshed++;
+            } catch (Exception e) {
+                failed++;
+                log.warn("刷新用户画像失败: userId={}, error={}", userId, e.getMessage());
+            }
+        }
+
+        log.info("全量刷新完成: 成功={}, 失败={}", refreshed, failed);
     }
 
     /**
-     * 构建完整用户画像
+     * 构建完整用户画像（基于MySQL行为数据）
      */
     public void buildFullProfile(Long userId) {
         String profileKey = PROFILE_KEY_PREFIX + userId;
-
         LocalDateTime now = LocalDateTime.now();
         LocalDateTime thirtyDaysAgo = now.minusDays(activeDaysThreshold);
 
@@ -153,57 +231,45 @@ public class UserProfileService {
         }
 
         Map<Long, Long> itemCategoryMap = candidateRecallService.buildItemCategoryMap();
+        Map<Long, Map<String, Object>> itemFeatures = candidateRecallService.buildFullItemFeatureMap();
 
-        // 1. 活跃度标签
-        String activeLevel = computeActiveLevel(behaviors, now);
+        // 计算标签
+        String activeLevel = computeActiveLevelFromBehaviors(behaviors, now);
+        String purchasePower = computePurchasePowerFromBehaviors(behaviors);
+        List<String> preferCategories = computePreferCategories(behaviors, itemCategoryMap);
+        String browseDepth = computeBrowseDepthFromBehaviors(behaviors);
+        String priceRange = computePriceRangeFromBehaviors(behaviors, itemFeatures);
+        double rfmScore = computeRfmScoreFromBehaviors(behaviors, now);
 
-        // 2. 消费能力标签
-        String purchasePower = computePurchasePower(behaviors);
+        int totalBehaviors = behaviors.size();
+        int buyCount = (int) behaviors.stream().filter(b -> "buy".equalsIgnoreCase(b.getBehaviorType())).count();
+        int cartCount = (int) behaviors.stream().filter(b -> "cart".equalsIgnoreCase(b.getBehaviorType())).count();
+        LocalDateTime lastActive = behaviors.stream()
+            .map(UserBehavior::getCreateTime)
+            .max(LocalDateTime::compareTo)
+            .orElse(now);
 
-        // 3. 偏好类目
-        List<String> preferCategories = computePreferCategories(userId, itemCategoryMap);
-
-        // 4. 浏览深度
-        String browseDepth = computeBrowseDepth(behaviors);
-
-        // 5. 价格偏好（如果有商品价格数据）
-        String priceRange = computePriceRange(behaviors, itemCategoryMap);
-
-        // 写入 Redis
-        Map<String, String> profile = new LinkedHashMap<>();
+        // 写入Redis
+        Map<String, Object> profile = new LinkedHashMap<>();
         profile.put("active_level", activeLevel);
         profile.put("purchase_power", purchasePower);
         profile.put("prefer_categories", String.join(",", preferCategories));
         profile.put("browse_depth", browseDepth);
         profile.put("price_range", priceRange);
+        profile.put("rfm_score", rfmScore);
         profile.put("last_update", now.toString());
-        profile.put("behavior_count", String.valueOf(behaviors.size()));
+        profile.put("behavior_count", totalBehaviors);
+        profile.put("buy_count", buyCount);
+        profile.put("cart_count", cartCount);
 
-        Map<String, String> counters = new HashMap<>();
-        Map<String, Integer> behaviorCounts = behaviors.stream()
-                .collect(Collectors.groupingBy(
-                        b -> normalizeBehaviorType(b.getBehaviorType()),
-                        Collectors.collectingAndThen(Collectors.counting(), Long::intValue)
-                ));
-        for (Map.Entry<String, Integer> e : behaviorCounts.entrySet()) {
-            counters.put("behavior_" + e.getKey(), String.valueOf(e.getValue()));
-        }
-
-        Map<String, Object> hashValues = new HashMap<>(profile);
-        counters.forEach(hashValues::put);
-
-        redisTemplate.opsForHash().putAll(profileKey, hashValues);
+        redisTemplate.opsForHash().putAll(profileKey, profile);
         redisTemplate.expire(profileKey, PROFILE_TTL_DAYS, TimeUnit.DAYS);
 
-        // 清理临时数据
-        redisTemplate.delete(profileKey + ":counters");
-        redisTemplate.delete(profileKey + ":category_scores");
-
         log.debug("构建用户画像: userId={}, active={}, power={}, categories={}",
-                userId, activeLevel, purchasePower, preferCategories);
+            userId, activeLevel, purchasePower, preferCategories);
     }
 
-    // ========== 查询 ==========
+    // ==================== 查询接口 ====================
 
     /**
      * 获取用户画像标签
@@ -213,27 +279,21 @@ public class UserProfileService {
         Map<Object, Object> raw = redisTemplate.opsForHash().entries(profileKey);
 
         if (raw == null || raw.isEmpty()) {
-            // 缓存未命中，构建一次
             buildFullProfile(userId);
             raw = redisTemplate.opsForHash().entries(profileKey);
         }
 
         if (raw == null || raw.isEmpty()) {
+            // 尝试从MySQL读取
+            UserPortrait portrait = portraitMapper.selectByUserId(userId);
+            if (portrait != null) {
+                return convertPortraitToMap(portrait);
+            }
             return Collections.emptyMap();
         }
 
         Map<String, Object> profile = new LinkedHashMap<>();
         raw.forEach((k, v) -> profile.put(k.toString(), v));
-
-        // 解析 prefer_categories
-        Object cats = profile.get("prefer_categories");
-        if (cats != null) {
-            String[] catArray = cats.toString().split(",");
-            profile.put("prefer_categories", Arrays.stream(catArray)
-                    .filter(s -> !s.isBlank())
-                    .collect(Collectors.toList()));
-        }
-
         return profile;
     }
 
@@ -248,91 +308,169 @@ public class UserProfileService {
         return results;
     }
 
-    // ========== 标签计算方法 ==========
+    /**
+     * 获取用户RFM分层标签
+     */
+    public String getRfmLevel(Long userId) {
+        Map<String, Object> profile = getProfile(userId);
+        Double rfmScore = profile.get("rfm_score") != null
+            ? Double.parseDouble(profile.get("rfm_score").toString()) : 0.0;
 
-    private String computeActiveLevel(List<UserBehavior> behaviors, LocalDateTime now) {
+        if (rfmScore >= 0.8) return "高价值用户";
+        if (rfmScore >= 0.5) return "活跃用户";
+        if (rfmScore >= 0.2) return "潜力用户";
+        return "沉默用户";
+    }
+
+    // ==================== 标签计算方法 ====================
+
+    private String computeActiveLevel(int totalBehaviors, Object lastActiveTime) {
+        long daysSinceActive = 30;
+        if (lastActiveTime != null) {
+            long lastActive = parseLong(lastActiveTime);
+            daysSinceActive = (System.currentTimeMillis() - lastActive) / (1000 * 60 * 60 * 24);
+        }
+
+        if (daysSinceActive > 14) return "沉默";
+        if (daysSinceActive > 7) return "低活";
+        if (totalBehaviors > 50) return "高活";
+        return "中活";
+    }
+
+    private String computeActiveLevelFromBehaviors(List<UserBehavior> behaviors, LocalDateTime now) {
         LocalDateTime lastActive = behaviors.stream()
-                .map(UserBehavior::getCreateTime)
-                .max(LocalDateTime::compareTo)
-                .orElse(now);
-        long daysSinceActive = ChronoUnit.DAYS.between(lastActive, now);
+            .map(UserBehavior::getCreateTime)
+            .max(LocalDateTime::compareTo)
+            .orElse(now);
+        long daysSinceActive = java.time.temporal.ChronoUnit.DAYS.between(lastActive, now);
 
-        long totalBehaviors = behaviors.size();
-        if (daysSinceActive > 14) {
-            return "沉默";
-        } else if (daysSinceActive > 7) {
-            return "低活";
-        } else if (totalBehaviors > 50) {
-            return "高活";
-        } else {
-            return "中活";
-        }
+        int totalBehaviors = behaviors.size();
+        if (daysSinceActive > 14) return "沉默";
+        if (daysSinceActive > 7) return "低活";
+        if (totalBehaviors > 50) return "高活";
+        return "中活";
     }
 
-    private String computePurchasePower(List<UserBehavior> behaviors) {
+    private String computePurchasePower(int buyCount, int cartCount) {
+        int score = buyCount * 5 + cartCount * 2;
+        if (score >= 10) return "高消费";
+        if (score >= 3) return "中消费";
+        return "低消费";
+    }
+
+    private String computePurchasePowerFromBehaviors(List<UserBehavior> behaviors) {
         long buyCount = behaviors.stream()
-                .filter(b -> "buy".equalsIgnoreCase(b.getBehaviorType()))
-                .count();
+            .filter(b -> "buy".equalsIgnoreCase(b.getBehaviorType())).count();
         long cartCount = behaviors.stream()
-                .filter(b -> "cart".equalsIgnoreCase(b.getBehaviorType()))
-                .count();
-
-        int score = (int) (buyCount * 5 + cartCount * 2);
-        if (score >= 10) {
-            return "高消费";
-        } else if (score >= 3) {
-            return "中消费";
-        } else {
-            return "低消费";
-        }
+            .filter(b -> "cart".equalsIgnoreCase(b.getBehaviorType())).count();
+        return computePurchasePower((int) buyCount, (int) cartCount);
     }
 
-    private List<String> computePreferCategories(Long userId, Map<Long, Long> itemCategoryMap) {
-        // 优先使用 Redis 中预计算的类目评分
-        String catKey = PROFILE_KEY_PREFIX + userId + ":category_scores";
-        Map<Object, Object> scores = redisTemplate.opsForHash().entries(catKey);
-
-        if (scores != null && !scores.isEmpty()) {
-            return scores.entrySet().stream()
-                    .sorted((a, b) -> {
-                        double va = parseDouble(a.getValue());
-                        double vb = parseDouble(b.getValue());
-                        return Double.compare(vb, va);
-                    })
-                    .limit(3)
-                    .map(e -> "类目" + e.getKey())
-                    .collect(Collectors.toList());
-        }
-
-        return Collections.emptyList();
+    private String computeBrowseDepth(int viewCount, int totalBehaviors) {
+        if (viewCount > 100 || totalBehaviors > 200) return "深度浏览";
+        if (viewCount > 20 || totalBehaviors > 50) return "中度浏览";
+        return "浅度浏览";
     }
 
-    private String computeBrowseDepth(List<UserBehavior> behaviors) {
+    private String computeBrowseDepthFromBehaviors(List<UserBehavior> behaviors) {
         long viewCount = behaviors.stream()
-                .filter(b -> "view".equalsIgnoreCase(b.getBehaviorType()))
-                .count();
-        if (viewCount > 100) {
-            return "深度浏览";
-        } else if (viewCount > 20) {
-            return "中度浏览";
-        } else {
-            return "浅度浏览";
-        }
+            .filter(b -> "view".equalsIgnoreCase(b.getBehaviorType())).count();
+        return computeBrowseDepth((int) viewCount, behaviors.size());
     }
 
-    private String computePriceRange(List<UserBehavior> behaviors, Map<Long, Long> itemCategoryMap) {
-        // 简化版本：基于用户购买/加购行为估算
-        long buyCartCount = behaviors.stream()
-                .filter(b -> "buy".equalsIgnoreCase(b.getBehaviorType())
-                        || "cart".equalsIgnoreCase(b.getBehaviorType()))
-                .count();
-        if (buyCartCount > 10) {
-            return "高价位";
-        } else if (buyCartCount > 3) {
-            return "中价位";
-        } else {
-            return "低价位";
+    private List<String> computePreferCategories(List<UserBehavior> behaviors, Map<Long, Long> itemCategoryMap) {
+        Map<Long, Double> categoryScores = new HashMap<>();
+
+        for (UserBehavior behavior : behaviors) {
+            Long categoryId = itemCategoryMap.get(behavior.getProductId());
+            if (categoryId == null) continue;
+
+            String type = normalizeBehaviorType(behavior.getBehaviorType());
+            double weight = getBehaviorWeight(type);
+            categoryScores.merge(categoryId, weight, Double::sum);
         }
+
+        // 返回Top3类目
+        return categoryScores.entrySet().stream()
+            .sorted(Map.Entry.<Long, Double>comparingByValue().reversed())
+            .limit(3)
+            .map(e -> "类目" + e.getKey())
+            .collect(Collectors.toList());
+    }
+
+    private String computePriceRangeFromBehaviors(List<UserBehavior> behaviors, Map<Long, Map<String, Object>> itemFeatures) {
+        long buyCartCount = behaviors.stream()
+            .filter(b -> "buy".equalsIgnoreCase(b.getBehaviorType())
+                    || "cart".equalsIgnoreCase(b.getBehaviorType())).count();
+        if (buyCartCount > 10) return "高价位";
+        if (buyCartCount > 3) return "中价位";
+        return "低价位";
+    }
+
+    /**
+     * 计算RFM得分
+     * - Recency: 最近活跃时间越近越好
+     * - Frequency: 行为频率越高越好
+     * - Monetary: 购买行为越多越好
+     */
+    private double computeRfmScore(Object lastActiveTime, int totalBehaviors, int buyCount) {
+        // Recency得分 (0-1, 越近越高)
+        double recencyScore = 0.5;
+        if (lastActiveTime != null) {
+            long lastActive = parseLong(lastActiveTime);
+            long daysSinceActive = (System.currentTimeMillis() - lastActive) / (1000 * 60 * 60 * 24);
+            recencyScore = Math.max(0, 1.0 - daysSinceActive / 30.0);
+        }
+
+        // Frequency得分 (0-1)
+        double frequencyScore = Math.min(1.0, totalBehaviors / 100.0);
+
+        // Monetary得分 (0-1)
+        double monetaryScore = Math.min(1.0, buyCount / 20.0);
+
+        // 综合得分
+        return recencyScore * 0.4 + frequencyScore * 0.3 + monetaryScore * 0.3;
+    }
+
+    private double computeRfmScoreFromBehaviors(List<UserBehavior> behaviors, LocalDateTime now) {
+        LocalDateTime lastActive = behaviors.stream()
+            .map(UserBehavior::getCreateTime)
+            .max(LocalDateTime::compareTo)
+            .orElse(now);
+        long daysSinceActive = java.time.temporal.ChronoUnit.DAYS.between(lastActive, now);
+
+        double recencyScore = Math.max(0, 1.0 - daysSinceActive / 30.0);
+        double frequencyScore = Math.min(1.0, behaviors.size() / 100.0);
+        long buyCount = behaviors.stream()
+            .filter(b -> "buy".equalsIgnoreCase(b.getBehaviorType())).count();
+        double monetaryScore = Math.min(1.0, buyCount / 20.0);
+
+        return recencyScore * 0.4 + frequencyScore * 0.3 + monetaryScore * 0.3;
+    }
+
+    private Map<String, Object> convertPortraitToMap(UserPortrait portrait) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("user_id", portrait.getUserId());
+        map.put("active_level", portrait.getActiveLevel());
+        map.put("purchase_power", portrait.getPurchasePower());
+        map.put("prefer_categories", portrait.getPreferCategoryIds());
+        map.put("prefer_category_names", portrait.getPreferCategoryNames());
+        map.put("browse_depth", portrait.getBrowseDepth());
+        map.put("price_range", portrait.getPriceRange());
+        map.put("rfm_score", portrait.getRfmScore());
+        map.put("rfm_level", getRfmLevelFromScore(portrait.getRfmScore()));
+        map.put("behavior_count", portrait.getBehaviorCount());
+        map.put("buy_count", portrait.getBuyCount());
+        map.put("cart_count", portrait.getCartCount());
+        map.put("last_active_time", portrait.getLastActiveTime());
+        return map;
+    }
+
+    private String getRfmLevelFromScore(Double score) {
+        if (score == null || score < 0.2) return "沉默用户";
+        if (score < 0.5) return "潜力用户";
+        if (score < 0.8) return "活跃用户";
+        return "高价值用户";
     }
 
     private String normalizeBehaviorType(String type) {
@@ -348,13 +486,33 @@ public class UserProfileService {
         };
     }
 
-    private double parseDouble(Object value) {
-        if (value == null) return 0.0;
-        if (value instanceof Number) return ((Number) value).doubleValue();
+    private double getBehaviorWeight(String type) {
+        return switch (type) {
+            case "buy" -> 8.0;
+            case "favorite" -> 5.0;
+            case "cart" -> 4.0;
+            case "click" -> 2.0;
+            default -> 1.0;
+        };
+    }
+
+    private int parseInt(Object value) {
+        if (value == null) return 0;
+        if (value instanceof Number) return ((Number) value).intValue();
         try {
-            return Double.parseDouble(value.toString());
+            return Integer.parseInt(value.toString());
         } catch (NumberFormatException e) {
-            return 0.0;
+            return 0;
+        }
+    }
+
+    private long parseLong(Object value) {
+        if (value == null) return 0;
+        if (value instanceof Number) return ((Number) value).longValue();
+        try {
+            return Long.parseLong(value.toString());
+        } catch (NumberFormatException e) {
+            return 0;
         }
     }
 }

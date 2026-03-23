@@ -189,7 +189,7 @@
             <span>{{ floor.subtitle }}</span>
           </div>
           <el-row :gutter="16">
-            <el-col :span="6" v-for="item in floor.items" :key="`${floor.title}-${item.id}`">
+            <el-col :span="4" v-for="item in floor.items" :key="`${floor.title}-${item.id}`">
               <div class="mini-card" @click="handleViewProduct(item)">
                 <el-image :src="getProductImage(item)" fit="cover" />
                 <p class="name">{{ item.name }}</p>
@@ -223,6 +223,9 @@ const floorProducts = ref({
 })
 const categories = ref([])
 const defaultImage = 'https://picsum.photos/400/400?random=999'
+// 曝光埋点相关
+const exposedProductIds = ref(new Set())
+let exposureDebounceTimer = null
 
 // 秒杀相关数据
 const seckillProducts = ref([])
@@ -282,7 +285,7 @@ const activities = [
   { title: '直播精选', desc: '边看边买，爆款直降' }
 ]
 
-const hotProducts = computed(() => products.value.slice(0, 16))
+const hotProducts = computed(() => products.value.slice(0, 40))
 
 // 是否显示个性化推荐（登录用户且有推荐结果）
 const isPersonalized = computed(() => {
@@ -325,7 +328,7 @@ async function refreshRecommendations() {
   try {
     // 并行获取灰度状态和推荐结果
     const [res, grayRes] = await Promise.all([
-      api.getRecommendationProducts(userStore.userInfo.id, 32).catch(() => null),
+        api.getRecommendationProducts(userStore.userInfo.id, 40).catch(() => null),
       api.checkGrayUser(userStore.userInfo.id).catch(() => null)
     ])
 
@@ -334,7 +337,7 @@ async function refreshRecommendations() {
 
     if (newProducts.length > 0) {
       const shuffled = newProducts.sort(() => Math.random() - 0.5)
-      products.value = generateRecReason(shuffled.slice(0, 16), isGray)
+      products.value = generateRecReason(shuffled.slice(0, 40), isGray)
       ElMessage.success('已换一批推荐商品')
     }
   } catch (error) {
@@ -485,7 +488,7 @@ async function loadPopularProducts() {
     // 优先使用个性化推荐（并行获取推荐和灰度状态，避免串行等待）
     if (userStore.token && userStore.userInfo?.id) {
       const [personalRes, grayRes] = await Promise.all([
-        api.getRecommendationProducts(userStore.userInfo.id, 32),
+        api.getRecommendationProducts(userStore.userInfo.id, 40),
         api.checkGrayUser(userStore.userInfo.id).catch(() => null)
       ])
 
@@ -494,15 +497,19 @@ async function loadPopularProducts() {
 
       if (personalProducts.length > 0) {
         products.value = generateRecReason(personalProducts, isGray)
+        // 记录曝光埋点
+        await recordExposureBatch()
         return
       }
     }
 
-    const popularCardsRes = await api.getPopularProductCards(16)
+    const popularCardsRes = await api.getPopularProductCards(48)
     const popularCards = popularCardsRes?.data?.products || []
 
     if (Array.isArray(popularCards) && popularCards.length > 0) {
       products.value = generateRecReason(popularCards, false)
+      // 记录曝光埋点
+      await recordExposureBatch()
       return
     }
 
@@ -516,6 +523,8 @@ async function loadPopularProducts() {
       const popularSet = new Set(popularIds.map(id => Number(id)))
       const popularProducts = allProducts.filter(item => popularSet.has(Number(item.id)))
       products.value = generateRecReason(popularProducts.length > 0 ? [...popularProducts, ...allProducts] : allProducts, false)
+      // 记录曝光埋点
+      await recordExposureBatch()
       return
     }
 
@@ -524,6 +533,48 @@ async function loadPopularProducts() {
     console.error('Failed to load products:', error)
     ElMessage.error('热门商品加载失败')
   }
+}
+
+// 曝光埋点：批量记录推荐商品曝光
+async function recordExposureBatch() {
+  // 防抖：避免频繁调用
+  if (exposureDebounceTimer) {
+    clearTimeout(exposureDebounceTimer)
+  }
+  exposureDebounceTimer = setTimeout(async () => {
+    exposureDebounceTimer = null
+    if (!userStore.token || !userStore.userInfo?.id) return
+    if (products.value.length === 0) return
+
+    // 获取待曝光的商品（避免重复曝光）
+    const newExposures = products.value
+      .filter(p => !exposedProductIds.value.has(p.id))
+      .slice(0, 20)  // 最多曝光20个
+      .map(p => Number(p.id))
+
+    if (newExposures.length === 0) return
+
+    // 记录已曝光
+    newExposures.forEach(id => exposedProductIds.value.add(id))
+    // 限制已曝光集合大小（避免内存泄漏）
+    if (exposedProductIds.value.size > 200) {
+      const arr = Array.from(exposedProductIds.value)
+      exposedProductIds.value = new Set(arr.slice(-100))
+    }
+
+    try {
+      await api.recordExposures({
+        userId: userStore.userInfo.id,
+        productIds: newExposures,
+        recommendType: 'deepfm'
+      })
+      console.debug('曝光埋点已记录:', newExposures.length, '个商品')
+    } catch (error) {
+      console.warn('曝光埋点记录失败:', error)
+      // 移除失败的曝光记录，下次重试
+      newExposures.forEach(id => exposedProductIds.value.delete(id))
+    }
+  }, 500)  // 延迟500ms，等待页面渲染完成
 }
 
 async function loadFloorProducts() {
@@ -538,8 +589,8 @@ async function loadFloorProducts() {
     const appliances = appliancesRes?.data?.products || []
     const household = householdRes?.data?.products || []
 
-    floorProducts.value.digitalHome = uniqueById([...electronics, ...appliances]).slice(0, 4)
-    floorProducts.value.household = uniqueById(household).slice(0, 4)
+    floorProducts.value.digitalHome = uniqueById([...electronics, ...appliances]).slice(0, 6)
+    floorProducts.value.household = uniqueById(household).slice(0, 6)
   } catch (error) {
     console.error('Failed to load floor products:', error)
   }
@@ -619,7 +670,8 @@ async function handleAddToCart(product) {
     // 刷新购物车数量（从 Redis 获取最新值）
     cartStore.fetchCartCount(userStore.userInfo.id)
   } catch (error) {
-    ElMessage.error('添加失败')
+    const msg = api.getErrorMessage(error, '添加失败')
+    ElMessage.error(msg)
   }
 }
 </script>
@@ -1363,7 +1415,7 @@ async function handleAddToCart(product) {
 
 .product-card .el-image {
   width: 100%;
-  height: 210px;
+  height: 260px;
 }
 
 /* 商品卡片标签 (移至上方统一管理) */

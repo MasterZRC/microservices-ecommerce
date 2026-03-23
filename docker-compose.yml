@@ -8,11 +8,17 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
       TZ: ${TZ}
+      MYSQL_CHARACTER_SET_SERVER: utf8mb4
+      MYSQL_COLLATION_SERVER: utf8mb4_0900_ai_ci
+    command: >
+      bash -c "chmod 755 /etc/mysql && chmod 644 /etc/mysql/conf.d/*.cnf
+      && docker-entrypoint.sh --character-set-client-handshake=0 --character-set-server=utf8mb4 --collation-server=utf8mb4_0900_ai_ci"
     ports:
       - "3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
       - ./infrastructure/mysql/init:/docker-entrypoint-initdb.d
+      - ./infrastructure/mysql/conf:/etc/mysql/conf.d
     networks:
       - ecommerce-network
 
@@ -141,8 +147,8 @@ services:
       - "8004:8004"
     environment:
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/ecommerce?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER}
-      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      DB_USERNAME: ${MYSQL_USER}
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       REDIS_HOST: redis
       NACOS_SERVER_ADDR: nacos:8848
       PRODUCT_SERVICE_URL: http://product-service:8002

@@ -1,17 +1,9 @@
 package com.ecommerce.recommendation.algorithm;
 
-import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
 import java.util.*;
 
-/**
- * Item-CF 协同过滤推荐算法
- * 创新点：
- * 1. 引入时间衰减因子 - 近期行为权重更高
- * 2. 结合类别相似度 - 同一类别商品相似度加权
- * 3. 热门商品降权 - 避免头部效应
- * 4. 混合冷启动策略 - 基于热门+类别+标签
- * 5. 缓存版本控制 - 支持矩阵增量更新
- */
+@Slf4j
 public class ItemCFAlgorithm {
 
     // 时间衰减因子 (7天内行为权重衰减)
@@ -130,19 +122,30 @@ public class ItemCFAlgorithm {
                 }
             }
         }
+        // 【调试】itemNorm 分布
+        double minNorm = itemNorm.values().stream().mapToDouble(Double::doubleValue).min().orElse(0);
+        double maxNorm = itemNorm.values().stream().mapToDouble(Double::doubleValue).max().orElse(0);
+        double avgNorm = itemNorm.values().stream().mapToDouble(Double::doubleValue).average().orElse(0);
+        int normCount = itemNorm.size();
+        System.out.println("[ItemCF_DEBUG] itemNorm: count=" + normCount + ", min=" + minNorm + ", max=" + maxNorm + ", avg=" + avgNorm);
+        System.out.println("[ItemCF_DEBUG] sample itemNorm: " + itemNorm.entrySet().iterator().next());
 
         Map<Long, Map<Long, Double>> similarityMatrix = new HashMap<>();
+        int totalCoOccEntries = 0;
+        int zeroNormSkips = 0;
         for (Map.Entry<Long, Map<Long, Double>> itemEntry : coOccurrence.entrySet()) {
             Long itemI = itemEntry.getKey();
             Map<Long, Double> similarities = new HashMap<>();
 
             for (Map.Entry<Long, Double> pair : itemEntry.getValue().entrySet()) {
+                totalCoOccEntries++;
                 Long itemJ = pair.getKey();
                 double cij = pair.getValue();
 
                 double normI = Math.sqrt(itemNorm.getOrDefault(itemI, 0.0));
                 double normJ = Math.sqrt(itemNorm.getOrDefault(itemJ, 0.0));
                 if (normI <= EPS || normJ <= EPS) {
+                    zeroNormSkips++;
                     continue;
                 }
 
@@ -158,7 +161,7 @@ public class ItemCFAlgorithm {
 
             similarityMatrix.put(itemI, similarities);
         }
-
+        System.out.println("[ItemCF_DEBUG] coOccurrence entries=" + totalCoOccEntries + ", zeroNormSkips=" + zeroNormSkips + ", finalMatrix entries=" + similarityMatrix.values().stream().mapToInt(m -> m.size()).sum());
         return similarityMatrix;
     }
 

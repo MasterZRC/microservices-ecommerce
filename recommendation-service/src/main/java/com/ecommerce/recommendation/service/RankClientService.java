@@ -139,6 +139,77 @@ public class RankClientService {
     }
 
     /**
+     * 带分数的排序方法
+     * 调用 /rank/simple，返回 Map&lt;商品ID, DeepFM分数&gt;
+     *
+     * @return 排序后的商品ID及其DeepFM分数映射
+     */
+    public Map<Long, Double> rankWithScores(Long userId, List<Long> candidateIds,
+                                            Map<String, Object> userFeatures,
+                                            Map<String, Map<String, Object>> itemFeatures) {
+        Map<Long, Double> result = new LinkedHashMap<>();
+
+        if (!rerankEnabled) {
+            for (Long id : candidateIds) result.put(id, 0.5);
+            return result;
+        }
+
+        if (candidateIds == null || candidateIds.isEmpty()) {
+            return result;
+        }
+
+        try {
+            Map<String, Object> request = buildRankRequest(userId, candidateIds, userFeatures, itemFeatures);
+            String url = rankServiceUrl + "/rank/simple";
+
+            ResponseEntity<Map> response = executeRankRequest(url, request);
+
+            if (response != null && response.getBody() != null) {
+                Map<String, Object> body = response.getBody();
+                if (body.containsKey("ranked_items")) {
+                    @SuppressWarnings("unchecked")
+                    List<Map<String, Object>> rankedItems = (List<Map<String, Object>>) body.get("ranked_items");
+
+                    for (Map<String, Object> item : rankedItems) {
+                        Object id = item.get("item_id");
+                        Object score = item.get("score");
+                        if (id instanceof Number) {
+                            long productId = ((Number) id).longValue();
+                            double scoreValue = 0.0;
+                            if (score instanceof Number) {
+                                scoreValue = ((Number) score).doubleValue();
+                            }
+                            result.put(productId, scoreValue);
+                        }
+                    }
+
+                    if (!result.isEmpty()) {
+                        log.info("排序成功(含分数): userId={}, ranked={}", userId, result.size());
+                        return result;
+                    }
+                }
+            }
+
+            log.warn("排序响应异常，返回默认分数: userId={}", userId);
+
+        } catch (HttpStatusCodeException e) {
+            log.error("排序服务返回错误: userId={}, status={}, body={}",
+                    userId, e.getStatusCode(), e.getResponseBodyAsString());
+            recordRankError(userId, "http_error", e.getStatusCode().value());
+        } catch (RestClientException e) {
+            log.error("排序服务调用失败: userId={}, error={}", userId, e.getMessage());
+            recordRankError(userId, "connection_error", 0);
+        } catch (Exception e) {
+            log.error("排序服务未知错误: userId={}, error={}", userId, e.getMessage(), e);
+            recordRankError(userId, "unknown_error", 0);
+        }
+
+        // 降级：所有候选返回默认分数
+        for (Long id : candidateIds) result.put(id, 0.5);
+        return result;
+    }
+
+    /**
      * 验证特征完整性
      */
     private FeatureValidationResult validateFeatures(Map<String, Object> userFeatures, 

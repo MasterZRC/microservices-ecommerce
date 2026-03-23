@@ -18,6 +18,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -203,6 +204,32 @@ public class ProductController {
             return ResponseEntity.ok(Map.of("products", List.of()));
         }
         List<Product> products = productService.getProductsByIds(ids);
+        return ResponseEntity.ok(Map.of("products", products));
+    }
+
+    @GetMapping("/batch")
+    @Operation(
+        summary = "批量获取商品(GET)",
+        description = "根据商品ID列表批量获取商品详情，GET版本"
+    )
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "查询成功")
+    })
+    public ResponseEntity<Map<String, Object>> getProductsByIdsGet(
+            @Parameter(description = "商品ID列表，逗号分隔", required = true)
+            @RequestParam String ids) {
+        if (ids == null || ids.isBlank()) {
+            return ResponseEntity.ok(Map.of("products", List.of()));
+        }
+        List<Long> idList = Arrays.stream(ids.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .map(Long::parseLong)
+                .toList();
+        if (idList.isEmpty()) {
+            return ResponseEntity.ok(Map.of("products", List.of()));
+        }
+        List<Product> products = productService.getProductsByIds(idList);
         return ResponseEntity.ok(Map.of("products", products));
     }
 }

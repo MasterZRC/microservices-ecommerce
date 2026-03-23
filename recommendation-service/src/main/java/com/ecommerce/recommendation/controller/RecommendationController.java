@@ -1,5 +1,6 @@
 package com.ecommerce.recommendation.controller;
 
+import com.ecommerce.recommendation.service.ExposureService;
 import com.ecommerce.recommendation.service.ExperimentService;
 import com.ecommerce.recommendation.service.GrayReleaseService;
 import com.ecommerce.recommendation.service.RecommendationService;
@@ -30,6 +31,7 @@ public class RecommendationController {
     private final GrayReleaseService grayReleaseService;
     private final ExperimentService experimentService;
     private final UserProfileService userProfileService;
+    private final ExposureService exposureService;
 
     /**
      * 内部 Header：从网关 JwtAuthenticationFilter 传递的已认证用户ID
@@ -148,20 +150,10 @@ public class RecommendationController {
             @Parameter(description = "商品ID")
             @RequestParam(required = false) Long productId,
             @Parameter(description = "行为类型：view/click/cart/favorite/buy")
-            @RequestParam(required = false) String behaviorType,
-            @Parameter(description = "JSON格式请求体")
-            @RequestBody(required = false) BehaviorRequest body) {
-        Long pid, uid;
-        String type;
-        if (body != null) {
-            pid = body.productId;
-            uid = body.userId;
-            type = body.behaviorType;
-        } else {
-            pid = productId;
-            uid = userId;
-            type = behaviorType;
-        }
+            @RequestParam(required = false) String behaviorType) {
+        Long pid = productId;
+        Long uid = userId;
+        String type = behaviorType;
         Long verifiedUserId = (authUserId != null) ? authUserId : uid;
         if (verifiedUserId == null) {
             return ResponseEntity.badRequest().body(Map.of(
@@ -171,6 +163,104 @@ public class RecommendationController {
         }
         recommendationService.recordBehavior(verifiedUserId, pid, type);
         return ResponseEntity.ok(Map.of("message", "行为记录成功"));
+    }
+
+    @PostMapping("/exposure")
+    @Operation(
+        summary = "记录商品曝光",
+        description = "记录用户对推荐商品的曝光行为，用于曝光负采样和在线学习"
+    )
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "记录成功"),
+        @ApiResponse(responseCode = "400", description = "参数无效"),
+        @ApiResponse(responseCode = "401", description = "用户未登录")
+    })
+    public ResponseEntity<Map<String, Object>> recordExposure(
+            @Parameter(description = "网关认证用户ID（内部使用）", hidden = true)
+            @RequestHeader(value = HEADER_AUTH_USER_ID, required = false) Long authUserId,
+            @Parameter(description = "用户ID")
+            @RequestParam Long userId,
+            @Parameter(description = "商品ID")
+            @RequestParam Long productId,
+            @Parameter(description = "推荐位排名（从1开始）")
+            @RequestParam(required = false, defaultValue = "0") Integer position,
+            @Parameter(description = "推荐来源：deepfm/cf/popular")
+            @RequestParam(required = false, defaultValue = "deepfm") String recommendType) {
+        Long verifiedUserId = (authUserId != null) ? authUserId : userId;
+        exposureService.recordExposure(verifiedUserId, productId, position, recommendType);
+        return ResponseEntity.ok(Map.of("message", "曝光记录成功"));
+    }
+
+    @PostMapping("/exposure/batch")
+    @Operation(
+        summary = "批量记录商品曝光",
+        description = "一次性记录多个商品的曝光（用于推荐结果返回时）"
+    )
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "记录成功"),
+        @ApiResponse(responseCode = "400", description = "参数无效"),
+        @ApiResponse(responseCode = "401", description = "用户未登录")
+    })
+    public ResponseEntity<Map<String, Object>> recordExposures(
+            @Parameter(description = "网关认证用户ID（内部使用）", hidden = true)
+            @RequestHeader(value = HEADER_AUTH_USER_ID, required = false) Long authUserId,
+            @RequestBody Map<String, Object> request) {
+        Long authId = (authUserId != null) ? authUserId : null;
+        Long userId;
+        Object uidObj = request.get("userId");
+        if (uidObj instanceof Number) {
+            userId = ((Number) uidObj).longValue();
+        } else {
+            return ResponseEntity.badRequest().body(Map.of("code", 400, "message", "userId 无效"));
+        }
+        Long verifiedUserId = (authId != null) ? authId : userId;
+
+        @SuppressWarnings("unchecked")
+        List<Number> productIdsRaw = (List<Number>) request.get("productIds");
+        if (productIdsRaw == null || productIdsRaw.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("code", 400, "message", "productIds 不能为空"));
+        }
+        List<Long> productIds = productIdsRaw.stream().map(Number::longValue).toList();
+
+        String recommendType = (String) request.getOrDefault("recommendType", "deepfm");
+        exposureService.recordExposures(verifiedUserId, productIds, recommendType);
+        return ResponseEntity.ok(Map.of(
+                "message", "批量曝光记录成功",
+                "count", productIds.size()
+        ));
+    }
+
+    @GetMapping("/exposure/samples")
+    @Operation(
+        summary = "获取曝光负样本",
+        description = "查询用户曝光但未点击的商品列表（用于训练负采样）"
+    )
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "查询成功"),
+        @ApiResponse(responseCode = "401", description = "用户未登录")
+    })
+    public ResponseEntity<Map<String, Object>> getExposureSamples(
+            @Parameter(description = "网关认证用户ID（内部使用）", hidden = true)
+            @RequestHeader(value = HEADER_AUTH_USER_ID, required = false) Long authUserId,
+            @Parameter(description = "用户ID")
+            @RequestParam Long userId,
+            @Parameter(description = "需要排除的商品ID列表")
+            @RequestParam(required = false) String excludeItems,
+            @Parameter(description = "返回数量上限", example = "20")
+            @RequestParam(defaultValue = "20") Integer limit) {
+        Long verifiedUserId = (authUserId != null) ? authUserId : userId;
+        java.util.Set<Long> excludeSet = new java.util.HashSet<>();
+        if (excludeItems != null && !excludeItems.isBlank()) {
+            for (String s : excludeItems.split(",")) {
+                try { excludeSet.add(Long.parseLong(s.trim())); } catch (Exception ignored) {}
+            }
+        }
+        List<Long> samples = exposureService.getExposureNegativeSamples(verifiedUserId, excludeSet, limit);
+        return ResponseEntity.ok(Map.of(
+                "userId", verifiedUserId,
+                "negativeSamples", samples,
+                "count", samples.size()
+        ));
     }
 
     @PostMapping("/refresh")

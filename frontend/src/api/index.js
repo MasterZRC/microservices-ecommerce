@@ -176,7 +176,7 @@ export default {
     return api.get('/order/cart/count', { params: { userId } })
   },
   addToCart(params) {
-    return api.post('/order/cart/add', null, { params })
+    return api.post('/order/cart/add', params)
   },
   removeFromCart(params) {
     return api.delete('/order/cart/remove', { params })
@@ -197,6 +197,14 @@ export default {
   },
   recordBehavior(params) {
     return api.post('/recommendation/behavior', null, { params })
+  },
+
+  // ====== 曝光埋点 ======
+  recordExposure(params) {
+    return api.post('/recommendation/exposure', null, { params })
+  },
+  recordExposures(data) {
+    return api.post('/recommendation/exposure/batch', data)
   },
 
   // ====== 灰度 / A/B ======

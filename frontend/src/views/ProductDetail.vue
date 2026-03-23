@@ -97,7 +97,8 @@ async function handleAddToCart() {
     // 刷新购物车数量（从 Redis 获取最新值）
     cartStore.fetchCartCount(userStore.userInfo.id)
   } catch (error) {
-    ElMessage.error('添加失败')
+    const msg = api.getErrorMessage(error, '添加失败')
+    ElMessage.error(msg)
   }
 }
 
