@@ -21,6 +21,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * JWT 认证过滤器
  * 1. 验证请求中的 JWT Token
@@ -29,6 +32,8 @@ import java.util.Map;
  */
 @Component
 public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
+
+    private static final Logger log = LoggerFactory.getLogger(JwtAuthenticationFilter.class);
 
     public static final String HEADER_USER_ID = "X-Authenticated-User-Id";
     public static final String HEADER_USER_ROLE = "X-Authenticated-User-Role";
@@ -40,8 +45,13 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
             "/api/product/category",
             "/api/recommendation/popular",
             "/api/recommendation/popular/products",
+            "/api/recommendation/personal",
+            "/api/recommendation/personal/products",
             "/api/recommendation/gray/status",
             "/api/recommendation/gray/check",
+            "/api/seckill/products",
+            "/api/seckill/products/upcoming",
+            "/api/seckill/activity",
             "/health",
             "/actuator"
     );
@@ -61,6 +71,7 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
 
         String authHeader = request.getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            log.warn("Missing or invalid Authorization header for path: {}", path);
             return unauthorized(exchange.getResponse());
         }
 
@@ -73,6 +84,7 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
 
             Long userId = extractUserId(claims);
             String role = extractRole(claims);
+            log.info("JWT validated: userId={}, role={}, path={}", userId, role, path);
 
             // 将认证后的用户信息通过内部 Header 传递给下游服务
             // 下游服务必须使用此 Header 中的 userId，禁止信任前端传入的 userId 参数
@@ -88,6 +100,7 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
             return chain.filter(mutatedExchange);
 
         } catch (Exception e) {
+            log.warn("JWT validation failed for path {}: {}", path, e.getMessage());
             return unauthorized(exchange.getResponse());
         }
     }
@@ -105,6 +118,7 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
                     .parseSignedClaims(token)
                     .getPayload();
         } catch (Exception e) {
+            log.warn("Token parse/verify failed: {}", e.getClass().getSimpleName() + ": " + e.getMessage());
             return null;
         }
     }

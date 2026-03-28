@@ -42,7 +42,7 @@ mybatis-plus:
       logic-not-delete-value: 0
 
 jwt:
-  secret: ${JWT_SECRET:changeme}
+  secret: ${JWT_SECRET:mySecretKeyForEcommerceGraduationProject2024}
   expiration: 86400000
 
 sentinel:

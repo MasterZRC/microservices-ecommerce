@@ -58,7 +58,7 @@ sentinel:
   eager: true
 
 jwt:
-  secret: ${JWT_SECRET:changeme}
+  secret: ${JWT_SECRET:mySecretKeyForEcommerceGraduationProject2024}
 
 logging:
   level:

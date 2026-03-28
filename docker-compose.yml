@@ -67,6 +67,7 @@ services:
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       REDIS_HOST: redis
       NACOS_SERVER_ADDR: nacos:8848
+      JWT_SECRET: ${JWT_SECRET}
       ORDER_SERVICE_URL: http://order-service:8003
       PRODUCT_SERVICE_URL: http://product-service:8002
     depends_on:
@@ -255,8 +256,25 @@ services:
     networks:
       - ecommerce-network
 
-  # Frontend - Running locally (not in Docker)
-  # To run locally: cd frontend && npm run dev
+  # Frontend (Nginx + Vue 3 SPA)
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: ecommerce-frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
 volumes:
   mysql-data:
