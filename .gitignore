@@ -148,3 +148,4 @@ logs/
 # OS
 # =============================================
 Thumbs.db
+/admin-frontend/node_modules/
