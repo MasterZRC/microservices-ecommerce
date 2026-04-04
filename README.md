@@ -1,6 +1,10 @@
 # microservices-ecommerce
 
-基于微服务架构的电商平台，集成了**个性化推荐系统**（多路召回 + DeepFM 精排）、**高并发秒杀系统**（Redis 原子操作 + Sentinel 限流）、**实时监控体系**（Prometheus + Grafana）和**全链路灰度发布**（A/B Testing）四大核心能力。技术栈覆盖 Spring Cloud Alibaba + Python FastAPI + Vue 3，完整覆盖从用户下单到商品推荐的电商全链路。
+> 从用户点击到推荐成单，一条完整的技术链路
+
+一个覆盖**推荐召回 → DeepFM 精排 → 秒杀高并发 → 全链路监控**的微服务电商实战项目。包含多路召回、在线学习、A/B 灰度发布、Sentinel 限流、Grafana 看板等生产级工程实践。
+
+[![Java](https://img.shields.io/badge/Java-17%2B-blue)]()  [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.x-green)]()  [![Python](https://img.shields.io/badge/Python-3.10-orange)]()  [![Vue%203](https://img.shields.io/badge/Vue%203-3.4-yellow)]()  [![Docker](https://img.shields.io/badge/Docker%20Compose-v2-blue)]()  [![License](https://img.shields.io/badge/License-MIT-lightgrey)]()
 
 ---
 
@@ -47,111 +51,101 @@
 
 ---
 
+## 核心能力
+
+### 推荐系统
+
+推荐系统是电商的核心竞争力，也是算法与工程结合最难的部分。
+
+**召回层：4 条互补通道，覆盖个性化和兜底**
+
+| 通道 | 算法 | 解决什么问题 |
+|------|------|------------|
+| ItemCF 协同过滤 | 加权余弦相似度 | 挖掘用户历史偏好 |
+| 热门商品召回 | 时间衰减热门度 | 冷启动用户有内容可看 |
+| 同类目热门召回 | 偏好类目加权 | 精准命中用户偏好类目 |
+| TF-IDF 内容召回 | N-gram + 最大池化 | 解决新商品冷启动 |
+
+工程细节：增量更新 `O(n²) → O(n·k)`、热门商品相似度惩罚、用户活跃度偏差抑制。
+
+**精排层：DeepFM-Attention，兼顾特征交互与序列兴趣**
+
+- FM 二阶通过 `(Σaᵢ)² - Σaᵢ²` 将复杂度从 `O(n²·k)` 降至 `O(n·k)`
+- DIN 风格 Attention 捕捉用户行为序列的时序兴趣
+- 仅灰度组 10% 流量使用精排，与对照组 A/B 对比效果
+
+**在线学习：分钟级增量更新**
+
+- Redis Stream 驱动曝光负采样（Exposed but Not Clicked）
+- 学习率 `lr = 0.0001`（正常训练 1/10），3 epochs 防震荡
+- 用户画像双轨：实时增量（毫秒级） + 每日凌晨全量重建
+
+### 高并发秒杀
+
+秒杀的本质是：在有限库存下，如何让尽可能多的真实用户成功下单。
+
+- **Sentinel 限流 + 熔断降级**：超出 QPS 限制自动降级，商品售罄时保护数据库
+- **布隆过滤器**：恶意刷单请求在 Redis 层拦截，不进业务层
+- **Redis Lua 原子操作**：`DECR` 库存扣减 + Redisson 分布式锁，保证库存一致性
+- **Redis Stream 异步下单**：秒杀请求先写 Stream，消费者异步创建订单，峰值与业务解耦
+- **库存多级同步**：DB → Redis 定时同步 + 本地热点缓存，减少 DB 压力
+
+并发回归脚本验证：`node scripts/loadtest/p1-seckill-regression.mjs`，输出成功率、延迟 P99、库存一致性。
+
+### 全链路监控与灰度发布
+
+可观测 + 流量控制是微服务从 demo 到生产的最后一步。
+
+**监控体系：Prometheus + Grafana**
+
+- Spring Boot Micrometer 覆盖 QPS、延迟、错误率、JVM 内存
+- Grafana 预置 `Microservices Overview`（全局健康）+ `Seckill Overview`（秒杀专项）两个看板
+
+**灰度发布：A/B Testing + 一致性哈希**
+
+- 一致性哈希分组，同一用户 7 天内始终命中同一组，体验一致
+- HyperLogLog 低内存统计指标（~12KB/指标，误差 ~0.81%），不干扰业务性能
+- 支持创建实验、查看分组、对比 CTR / 加购率 / 下单率
+
+---
+
+## 快速启动
+
+```bash
+# 1. 克隆 & 配置
+git clone https://github.com/YOUR_USERNAME/microservices-ecommerce.git
+cp .env.example .env   # 编辑 JWT_SECRET 等字段
+
+# 2. 一键启动（包含所有服务 + 监控栈）
+docker compose up -d --build
+
+# 3. 启动前端
+cd frontend && npm install && npm run dev
+
+# 4. 访问
+#   前端：http://localhost:5173
+#   Swagger：http://localhost:8080/swagger-ui.html
+#   Grafana：http://localhost:3001 （admin / admin123）
+```
+
+首次启动自动执行 SQL 初始化脚本。MySQL / Redis / Nacos 已内置于 docker-compose，无需单独安装。
+
+---
+
 ## 技术栈
 
-| 层级 | 技术选型 | 说明 |
-|------|---------|------|
-| **网关层** | Spring Cloud Gateway | JWT 认证、路由转发、请求限流 |
-| **业务服务层** | Spring Boot 3.x + MyBatis-Plus | 微服务业务逻辑 |
-| **推荐排序服务** | Python 3.10 + FastAPI + PyTorch | DeepFM-Attention CTR 预估 |
-| **缓存 / 消息** | Redis 7.2（Redisson / Redis Stream）| 分布式锁、缓存、消息队列 |
-| **数据库** | MySQL 8.0（utf8mb4） | 主数据存储 |
-| **服务治理** | Nacos 2.3.0 | 服务注册发现、配置中心 |
-| **流量防护** | Sentinel | 限流、熔断、降级 |
-| **前端** | Vue 3 + Element Plus + Vite + Pinia | 用户界面 |
-| **监控** | Prometheus + Grafana | 指标采集与可视化 |
-| **容器化** | Docker Compose | 一键部署 |
+Spring Cloud Alibaba · Spring Boot 3.x · MyBatis-Plus · Python 3.10 · FastAPI · PyTorch · Redis 7.2 · MySQL 8.0 · Nacos 2.3.0 · Sentinel · Docker Compose
 
 ---
 
-## 核心微服务
+## 贡献与反馈
 
-| 服务名 | 端口 | 技术栈 | 核心职责 |
-|--------|------|--------|---------|
-| `api-gateway` | 8080 | Spring Cloud Gateway | 统一入口、JWT 鉴权、路由分发 |
-| `user-service` | 8001 | Spring Boot + MySQL + Redis | 用户注册 / 登录 / JWT 签发 |
-| `product-service` | 8002 | Spring Boot + MySQL + Redis | 商品管理、类目查询、批量查询 |
-| `order-service` | 8003 | Spring Boot + MySQL | 订单创建、订单列表 |
-| `recommendation-service` | 8004 | Spring Boot + MySQL + Redis | 多路召回、灰度分流、用户画像、在线学习 |
-| `recommendation-rank-service` | 8010 | Python FastAPI + PyTorch | DeepFM-Attention CTR 精排推理 |
-| `seckill-service` | 8005 | Spring Boot + Sentinel + Redis | 秒杀活动、流量防护、Redis 原子操作 |
-| `frontend` | 80 | Vue 3 + Nginx | Web 应用界面 |
+欢迎提交 Issue 和 PR。如果这个项目对你有帮助，点个 Star 是最大的支持。
 
 ---
 
-## 核心功能亮点
-
-### 1. 推荐系统（两阶段：召回 + 精排）
-
-**召回层 — 四条通道并行互补**
-
-| 召回通道 | 算法 | 核心公式 | 作用 |
-|---------|------|---------|------|
-| ItemCF 协同过滤 | 加权余弦相似度 | $\text{sim}(i,j) = c_{ij} / (\|\|V_i\|\| \times \|\|V_j\|\|)$ | 个性化偏好挖掘 |
-| 热门商品召回 | 时间衰减热门度 | $\text{popularScore} = \sum \text{weight} \times \text{decayFactor}^{\text{daysAgo}}$ | 大众化兜底推荐 |
-| 同类目热门召回 | 偏好类目加权 | $\text{categoryScore} = \sum \text{weight} \times \text{decayFactor}^{\text{daysAgo}}$ | 精准偏好匹配 |
-| TF-IDF 内容召回 | N-gram + MM 池化 | $\text{userProfile}[t] = \max_{\text{item}} \text{TF-IDF}(\text{item},t)$ | 解决冷启动 |
-
-- ItemCF 增量更新：$O(n^2) \rightarrow O(n \cdot k)$，避免全量重算
-- 用户惩罚因子：$\text{userPenalty} = 1/\log(1+|I_u|)$，抑制刷单用户偏差
-- 热门惩罚：$1/\log(10 + (pop_i + pop_j)/2)$，解决热门物品相似度膨胀问题
-- 差异化过滤：已购买商品在 ItemCF 中过滤但保留在热门召回中（已加购商品同理）
-
-**排序层 — DeepFM-Attention 精排（仅灰度组 10%）**
-
-```
-FM 一阶:  y₁ = Σ wᵢ · xᵢ
-FM 二阶:  y₂ = Σ⟨Vᵢ,Vⱼ⟩·xᵢ·xⱼ  (O(n·k) via (Σaᵢ)² - Σaᵢ²)
-DNN:     多层全连接 [128→64→32] + BatchNorm + Dropout
-Attention: DIN 风格，捕捉用户行为序列时序兴趣
-输出:    sigmoid(y₁ + y₂ + DNN_out + Attention_out)
-```
-
-**后处理**
-
-- 类目 / 品牌 / 价格多维度打散，MMR 算法（$\lambda = 0.6$）平衡相关性与多样性
-- 智能跳过：候选池中偏好类目占比 > 60% 时跳过打散，避免过度干预
-- 推荐理由自动生成（来自 ItemCF 相似度、用户偏好类目、召回通道标识）
-
-**在线学习**
-
-- Redis Stream 事件驱动：曝光负采样（Exposed but Not Clicked）
-- 分钟级增量更新：学习率 $= 0.0001$（正常训练的 $1/10$），3 epochs 防震荡
-- 样本数量保护：最少 100 条触发，最多 5000 条/次
-
-**用户画像双轨更新**
-
-- 实时增量（行为触发，毫秒级）→ Redis 计数器 + 标记脏数据
-- 每日凌晨定时全量重建 → 从 MySQL 重算所有画像标签
-
-**算法评测**
-
-- 离线：Precision@K、Recall@K、NDCG@K、MRR@K、HitRate@K（按时间划分训练集/测试集）
-- 在线：A/B 测试，HyperLogLog 低内存统计（~12KB/指标，误差 ~0.81%）
-
-### 2. 秒杀系统
-
-- **Sentinel** 限流 + 熔断降级，`@SentinelResource` 注解绑定 fallback
-- **布隆过滤器**：恶意请求拦截，避免击穿数据库
-- **Redis Lua 原子操作**：库存扣减（`DECR`）+ 分布式锁（Redisson）
-- **Redis Stream** 异步下单：秒杀请求先写 Stream，消费者异步创建订单，解耦流量高峰
-- **库存多级同步**：DB → Redis 定时同步 + 热点数据本地缓存
-- **并发回归脚本**：
-  ```bash
-  node scripts/loadtest/p1-seckill-regression.mjs
-  ```
-  支持环境变量配置 `TOTAL`（默认 200）、`CONCURRENCY`（默认 20）、`STOCK`（默认 100）等
-
-### 3. 监控体系
-
-- **Prometheus**：Spring Boot Micrometer 指标采集，覆盖 QPS、延迟、错误率、JVM 内存
-- **Grafana 预置看板**（位于 `Microservices E-Commerce` 文件夹）：
-  - `Microservices Overview`：全服务健康状态、QPS 趋势、延迟分布
-  - `Seckill Overview`：秒杀成功率、库存一致性、下单吞吐量
-
----
-
-## 项目结构
+<details>
+<summary>项目结构</summary>
 
 ```
 microservices-ecommerce/
@@ -246,77 +240,12 @@ microservices-ecommerce/
 └── README.md
 ```
 
----
+</details>
 
-## 快速启动
+<details>
+<summary>完整 API 参考</summary>
 
-### 环境要求
-
-| 工具 | 版本 | 说明 |
-|------|------|------|
-| JDK | 17+ | Java 运行时 |
-| Maven | 3.8+ | 项目构建 |
-| Node.js | 18+ | 前端构建 |
-| Docker & Docker Compose | latest | 容器化部署 |
-
-MySQL（8.0）、Redis（7.2）、Nacos（2.3.0）已包含于 `docker-compose.yml`，无需单独安装。
-
-### 步骤一：配置环境变量
-
-```bash
-cp .env.example .env
-```
-
-编辑 `.env` 文件，必填项说明：
-
-```env
-# JWT 签名密钥（生产环境请使用随机字符串，不少于 32 字符）
-JWT_SECRET=your-secret-key-here
-MYSQL_DATABASE=ecommerce
-MYSQL_USER=ecommerce_user
-MYSQL_ROOT_PASSWORD=your-db-password
-```
-
-### 步骤二：一键启动全量服务
-
-```bash
-docker compose up -d --build
-```
-
-首次启动会自动执行 `infrastructure/mysql/init/` 下的 SQL 初始化脚本，完成数据库表创建和初始数据导入。`recommendation-rank-service` 已直接在 `docker-compose.yml` 中配置构建上下文，支持一键构建，无需手工操作。
-
-### 步骤三：启动前端（开发模式）
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-前端访问 `http://localhost:5173`，Vite 代理自动将 API 请求转发至 `http://localhost:8080`（API Gateway）。
-
-### 步骤四：启动监控栈（可选）
-
-```bash
-docker compose up -d prometheus grafana
-```
-
-| 组件 | 地址 | 默认账号 |
-|------|------|---------|
-| Prometheus | `http://localhost:9090` | — |
-| Grafana | `http://localhost:3001` | `admin` / `admin123` |
-
-预置看板位于 Grafana 的 `Microservices E-Commerce` 文件夹，包含 `Microservices Overview` 和 `Seckill Overview` 两个看板。
-
-### 仅启动基础设施（开发调试用）
-
-```bash
-docker compose -f docker-compose.infra.yml up -d
-```
-
----
-
-## API 文档
+### Swagger 在线文档
 
 所有服务均内置 Swagger 3（OpenAPI）在线文档：
 
@@ -399,9 +328,10 @@ docker compose -f docker-compose.infra.yml up -d
 | POST | `/data/generate` | 生成合成训练数据 | `X-API-Key` Header |
 | GET | `/health` | 健康检查 | 不需要 |
 
----
+</details>
 
-## 设计原则与安全机制
+<details>
+<summary>设计原则与安全机制</summary>
 
 ### 多层次安全体系
 
@@ -435,9 +365,10 @@ X-Authenticated-User-Id 注入内部 Header
 - **Sentinel 流量控制**：秒杀接口绑定 `@SentinelResource`，超出 QPS 限制自动触发降级逻辑
 - **请求链路追踪**：每个请求携带 `X-Request-Id` Header，可串联全链路日志
 
----
+</details>
 
-## 秒杀并发回归
+<details>
+<summary>秒杀并发回归</summary>
 
 执行一键并发回归脚本（输出成功率、延迟分布、库存一致性、DLQ 队列指标）：
 
@@ -462,6 +393,4 @@ node scripts/loadtest/p1-seckill-regression.mjs
 TOTAL=500 CONCURRENCY=50 STOCK=200 PRODUCT_ID=1 node scripts/loadtest/p1-seckill-regression.mjs
 ```
 
----
-
-*项目整理时间：2026-03-28*
+</details>
