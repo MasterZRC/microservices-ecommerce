@@ -33,6 +33,11 @@ build/
 *.swo
 *~
 .DS_Store
+.vscode/
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+*.orig
 
 # =============================================
 # Python (Recommendation Rank Service)
@@ -58,6 +63,17 @@ recommendation-rank-service/models/
 *.pth
 *.onnx
 *.h5
+
+# =============================================
+# Admin Frontend (Vue3 + Vite)
+# =============================================
+admin-frontend/node_modules/
+admin-frontend/dist/
+admin-frontend/.vite/
+admin-frontend/*.local
+admin-frontend/package-lock.json
+admin-frontend/yarn.lock
+admin-frontend/pnpm-lock.yaml
 
 # =============================================
 # Node.js / Frontend
@@ -91,6 +107,14 @@ infrastructure/grafana/data/
 META-INF/
 
 # =============================================
+# Scripts
+# =============================================
+scripts/loadtest/
+scripts/sql/reversed/
+scripts/sql/*.sql
+scripts/sql/*.txt
+
+# =============================================
 # Temporary / Debug Scripts
 # (delete these if they exist in your repo root)
 # =============================================
@@ -106,6 +130,12 @@ test-load-data.py
 generated-products-*.sql
 load_test_results.json
 thesis_test_*.json
+
+# =============================================
+# Documentation (generated/backup docs should not be committed)
+# =============================================
+docs/*-backup.md
+docs/project-structure-overview-*-backup.md
 
 # =============================================
 # Logs
