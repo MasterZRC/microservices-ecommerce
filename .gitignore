@@ -24,7 +24,9 @@ buildNumber.properties
 .gradle/
 build/
 
+# =============================================
 # IDE
+# =============================================
 *.iml
 *.ipr
 *.iws
@@ -148,4 +150,3 @@ logs/
 # OS
 # =============================================
 Thumbs.db
-/admin-frontend/node_modules/

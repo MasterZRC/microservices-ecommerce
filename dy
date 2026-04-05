@@ -1,0 +1,1 @@
+{"code":500,"message":"Required request body is missing: public com.ecommerce.admin.dto.common.ApiResponse<com.ecommerce.admin.dto.admin.LoginResponse> com.ecommerce.admin.controller.AdminAuthController.login(com.ecommerce.admin.dto.admin.LoginRequest)","data":null}
