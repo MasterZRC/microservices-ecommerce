@@ -106,6 +106,10 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
     }
 
     private boolean isExcluded(String path) {
+        // 只放行登录接口，其他管理接口需要验证 JWT
+        if ("/api/admin/auth/login".equals(path)) {
+            return true;
+        }
         return EXCLUDED_PATHS.stream().anyMatch(path::startsWith);
     }
 
@@ -124,6 +128,7 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
     }
 
     private Long extractUserId(Claims claims) {
+        // 首先尝试 userId
         Object userIdClaim = claims.get("userId");
         if (userIdClaim instanceof Number) {
             return ((Number) userIdClaim).longValue();
@@ -133,6 +138,18 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
                 return Long.parseLong((String) userIdClaim);
             } catch (NumberFormatException e) {
                 // userId claim 是字符串但不是数字ID，不可用
+            }
+        }
+        // 尝试 adminId（用于管理端）
+        Object adminIdClaim = claims.get("adminId");
+        if (adminIdClaim instanceof Number) {
+            return ((Number) adminIdClaim).longValue();
+        }
+        if (adminIdClaim instanceof String) {
+            try {
+                return Long.parseLong((String) adminIdClaim);
+            } catch (NumberFormatException e) {
+                // adminId claim 是字符串但不是数字ID，不可用
             }
         }
         // 最后 fallback：尝试解析 subject（如果项目使用 username 作为 subject 则不可用）
