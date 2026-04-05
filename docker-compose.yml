@@ -189,6 +189,43 @@ services:
     networks:
       - ecommerce-network
 
+  # Admin Service
+  admin-service:
+    build:
+      context: .
+      dockerfile: admin-service/Dockerfile
+    container_name: ecommerce-admin-service
+    restart: always
+    ports:
+      - "8006:8006"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/ecommerce?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      REDIS_HOST: redis
+      NACOS_SERVER_ADDR: nacos:8848
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      - mysql
+      - redis
+      - nacos
+    networks:
+      - ecommerce-network
+
+  # Admin Frontend (Nginx)
+  admin-frontend:
+    build:
+      context: .
+      dockerfile: admin-frontend/Dockerfile
+    container_name: ecommerce-admin-frontend
+    restart: always
+    ports:
+      - "8081:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - ecommerce-network
+
   # API Gateway
   api-gateway:
     build:
@@ -207,7 +244,8 @@ services:
       ORDER_SERVICE_URL: http://order-service:8003
       RECOMMENDATION_SERVICE_URL: http://recommendation-service:8004
       SECKILL_SERVICE_URL: http://seckill-service:8005
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      ADMIN_SERVICE_URL: http://admin-service:8006
+      JWT_SECRET: ${JWT_SECRET}
     depends_on:
       - nacos
       - user-service
@@ -215,6 +253,7 @@ services:
       - order-service
       - recommendation-service
       - seckill-service
+      - admin-service
     networks:
       - ecommerce-network
 
