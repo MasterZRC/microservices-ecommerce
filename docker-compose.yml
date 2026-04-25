@@ -21,6 +21,12 @@ services:
       - ./infrastructure/mysql/conf:/etc/mysql/conf.d
     networks:
       - ecommerce-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # Redis
   redis:
@@ -71,11 +77,20 @@ services:
       ORDER_SERVICE_URL: http://order-service:8003
       PRODUCT_SERVICE_URL: http://product-service:8002
     depends_on:
-      - mysql
-      - redis
-      - nacos
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      nacos:
+        condition: service_started
     networks:
       - ecommerce-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Product Service
   product-service:
@@ -93,11 +108,20 @@ services:
       REDIS_HOST: redis
       NACOS_SERVER_ADDR: nacos:8848
     depends_on:
-      - mysql
-      - redis
-      - nacos
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      nacos:
+        condition: service_started
     networks:
       - ecommerce-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Order Service
   order-service:
@@ -116,11 +140,20 @@ services:
       NACOS_SERVER_ADDR: nacos:8848
       PRODUCT_SERVICE_URL: http://product-service:8002
     depends_on:
-      - mysql
-      - redis
-      - nacos
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      nacos:
+        condition: service_started
     networks:
       - ecommerce-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Recommendation Rank Service (Python)
   recommendation-rank-service:
@@ -134,6 +167,14 @@ services:
       - "8010:8010"
     environment:
       PYTHONUNBUFFERED: "1"
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+    depends_on:
+      mysql:
+        condition: service_healthy
     networks:
       - ecommerce-network
 
@@ -158,12 +199,24 @@ services:
       GRAY_RATIO: "10"
       RERANK_ENABLED: "true"
     depends_on:
-      - mysql
-      - redis
-      - nacos
-      - recommendation-rank-service
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      nacos:
+        condition: service_started
+      recommendation-rank-service:
+        condition: service_started
+      skywalking-oap:
+        condition: service_started
     networks:
       - ecommerce-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Seckill Service
   seckill-service:
@@ -183,11 +236,20 @@ services:
       ORDER_SERVICE_URL: http://order-service:8003
       PRODUCT_SERVICE_URL: http://product-service:8002
     depends_on:
-      - mysql
-      - redis
-      - nacos
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      nacos:
+        condition: service_started
     networks:
       - ecommerce-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Admin Service
   admin-service:
@@ -205,12 +267,22 @@ services:
       REDIS_HOST: redis
       NACOS_SERVER_ADDR: nacos:8848
       JWT_SECRET: ${JWT_SECRET}
+      SECKILL_SERVICE_URL: http://seckill-service:8005
     depends_on:
-      - mysql
-      - redis
-      - nacos
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      nacos:
+        condition: service_started
     networks:
       - ecommerce-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Admin Frontend (Nginx)
   admin-frontend:
@@ -266,6 +338,7 @@ services:
       - "9090:9090"
     volumes:
       - ./infrastructure/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/monitoring/prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
     depends_on:
       - api-gateway
@@ -315,11 +388,103 @@ services:
       retries: 3
       start_period: 10s
 
+  # ==================== 可观测性基础设施 ====================
+
+  # SkyWalking OAP Server (链路追踪)
+  skywalking-oap:
+    image: apache/skywalking-oap-server:9.5.0
+    container_name: ecommerce-skywalking-oap
+    restart: always
+    ports:
+      - "11800:11800"
+      - "12800:12800"
+    environment:
+      SW_STORAGE: h2
+      JAVA_OPTS: -Xms512m -Xmx512m
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:12800/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # SkyWalking UI (链路追踪可视化)
+  skywalking-ui:
+    image: apache/skywalking-ui:9.5.0
+    container_name: ecommerce-skywalking-ui
+    restart: always
+    ports:
+      - "8082:8080"
+    environment:
+      SW_OAP_ADDRESS: http://skywalking-oap:11800
+    depends_on:
+      skywalking-oap:
+        condition: service_started
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Loki (日志聚合)
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: ecommerce-loki
+    restart: always
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./infrastructure/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    networks:
+      - ecommerce-network
+
+  # Promtail (日志采集)
+  promtail:
+    image: grafana/promtail:3.3.2
+    container_name: ecommerce-promtail
+    restart: always
+    command:
+      - '-config.file=/etc/promtail/promtail.yml'
+    volumes:
+      - ./logs:/logs:ro
+      - ./infrastructure/loki/promtail.yml:/etc/promtail/promtail.yml:ro
+      - promtail-data:/tmp/promtail
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - loki
+    networks:
+      - ecommerce-network
+
+  # AlertManager (告警)
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: ecommerce-alertmanager
+    restart: always
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./infrastructure/monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - ecommerce-network
+
 volumes:
   mysql-data:
   redis-data:
   prometheus-data:
   grafana-data:
+  loki-data:
+  alertmanager-data:
+  promtail-data:
 
 networks:
   ecommerce-network:
