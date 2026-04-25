@@ -280,8 +280,10 @@ microservices-ecommerce/
 │       └── alertmanager/            # AlertManager 告警配置
 │           └── alertmanager.yml     # 告警路由和接收器配置
 │
-├── scripts/loadtest/               # 并发压测脚本
-│   └── p1-seckill-regression.mjs    # 秒杀并发回归（输出成功率、延迟、库存一致性）
+├── scripts/loadtest/               # 并发压测脚本（Node，秒杀回归）
+│
+├── plan/                            # 历史实施计划归档（`plan/README.md`）
+├── docs/                            # 终验报告、Agent 架构、`endpoint-catalog` 等
 │
 ├── docker-compose.yml               # 全量服务一键启动（包含所有服务 + 监控）
 ├── docker-compose.infra.yml         # 仅启动基础设施（MySQL/Redis/Nacos）

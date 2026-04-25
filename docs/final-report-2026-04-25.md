@@ -216,7 +216,7 @@ ecommerce-alertmanager                  running
 
 ## 四、接口全量功能测试结果
 
-> 测试驱动器：Python `requests` 库 + 自研轻量化框架 (`.agent/testlib.py`)，测试用例总数 **131**，全部通过。
+> 测试驱动器：Python `requests` 库 + 自研轻量化测试框架（原置于本地 `.agent/`，已随临时目录清理；当时测试用例总数 **131**，全部通过）。
 
 ### 4.1 测试结果矩阵
 
@@ -234,7 +234,7 @@ ecommerce-alertmanager                  running
 | **合计**                      | **131** | **131** | **0** | **100%** 通过                      |
 
 
-详细 JSON 输出见 `.agent/results-*.json`。
+当时各模块详细 JSON 输出曾保存在本地 `.agent/results-*.json`，目录已按维护需要清理，结论仍以上表为准。
 
 ### 4.2 鉴权专项验证
 
@@ -433,9 +433,8 @@ ItemCF 二值加权对比 Popular 基线，HitRate@10 提升 100%、NDCG@10 提�
 
 | 路径                                | 内容                                        |
 | --------------------------------- | ----------------------------------------- |
-| `.agent/endpoint-catalog.md`      | 全部 113 接口分模块清单（CR：本次任务追踪用）                |
-| `.agent/results-*.json`           | 用户/商品/订单/推荐/秒杀/Admin/网关/Rank 各模块测试结果 JSON |
-| `.agent/recommend-model-test.log` | 推荐模型完整链路日志                                |
+| `docs/endpoint-catalog.md`         | 全部 113 接口分模块清单（自追踪表迁入仓库长期保留）        |
+| （已清理）`.agent/` 下临时 JSON/日志  | 当时全量跑测的机器可读输出，维护时已删除                      |
 | `docs/final-report-2026-04-25.md` | 本报告                                       |
 | `docs/recommendation/`*           | 历史推荐架构与基线对比文档                             |
 
