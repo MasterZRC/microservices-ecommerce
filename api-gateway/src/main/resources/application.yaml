@@ -48,6 +48,16 @@ spring:
           uri: ${ADMIN_SERVICE_URL:http://admin-service:8006}
           predicates:
             - Path=/api/alert/**
+        - id: agent-service
+          uri: ${AGENT_SERVICE_URL:http://agent-service:8011}
+          predicates:
+            - Path=/api/agent/**
+          # SSE 流式：去掉 /api 前缀（agent-service 内部路由是 /agent/...）
+          # 同时禁用响应缓冲，确保 token 即时送达
+          filters:
+            - StripPrefix=1
+            - SetResponseHeader=X-Accel-Buffering, no
+            - SetResponseHeader=Cache-Control, no-cache
         - id: seckill-service
           uri: ${SECKILL_SERVICE_URL:http://localhost:8005}
           predicates:

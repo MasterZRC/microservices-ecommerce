@@ -178,6 +178,48 @@ services:
     networks:
       - ecommerce-network
 
+  # AI Agent Service (Python FastAPI + DashScope qwen)
+  agent-service:
+    build:
+      context: ./agent-service
+      dockerfile: Dockerfile
+    image: ecommerce-agent-service:latest
+    container_name: ecommerce-agent-service
+    restart: always
+    ports:
+      - "8011:8011"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      QWEN_MODEL: ${QWEN_MODEL:-qwen-plus}
+      JWT_SECRET: ${JWT_SECRET}
+      PRODUCT_SERVICE_URL: http://product-service:8002
+      ORDER_SERVICE_URL: http://order-service:8003
+      RECOMMEND_SERVICE_URL: http://recommendation-service:8004
+      ADMIN_SERVICE_URL: http://admin-service:8006
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      AGENT_USER_DAILY_QUOTA: "100"
+      AGENT_ADMIN_DAILY_QUOTA: "300"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - ecommerce-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8011/agent/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   # Recommendation Service
   recommendation-service:
     build:
@@ -326,6 +368,7 @@ services:
       - recommendation-service
       - seckill-service
       - admin-service
+      - agent-service
     networks:
       - ecommerce-network
 

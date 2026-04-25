@@ -55,6 +55,9 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
             "/api/seckill/products/upcoming",
             "/api/seckill/activity",
             "/api/alert/webhook",
+            "/api/agent/health",
+            "/api/agent/greeting",
+            "/api/agent/metrics",
             "/health",
             "/actuator"
     );
