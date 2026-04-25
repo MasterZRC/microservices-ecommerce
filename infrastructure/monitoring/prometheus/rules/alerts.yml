@@ -288,3 +288,64 @@ groups:
         annotations:
           summary: "{{ $labels.job }} 数据库连接池即将耗尽"
           description: "{{ $labels.job }} 连接池使用率达到 {{ $value | humanizePercentage }}"
+
+  # ==================== AI Agent 告警 ====================
+  - name: agent_alerts
+    rules:
+      # Agent 请求错误率偏高
+      - alert: AgentRequestErrorHigh
+        expr: |
+          (
+            rate(agent_requests_total{status="error"}[5m])
+            /
+            (rate(agent_requests_total[5m]) + 0.001)
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          category: business
+          service: agent-service
+        annotations:
+          summary: "AI Agent 请求错误率过高"
+          description: "{{ $labels.channel }} 通道错误率 {{ $value | humanizePercentage }}，超过 10% 阈值，可能是 LLM 限流或工具失败"
+
+      # Agent 响应 P99 延迟过高
+      - alert: AgentLatencyP99High
+        expr: histogram_quantile(0.99, rate(agent_request_duration_seconds_bucket[5m])) > 30
+        for: 5m
+        labels:
+          severity: warning
+          category: business
+          service: agent-service
+        annotations:
+          summary: "AI Agent P99 延迟过高"
+          description: "{{ $labels.channel }} 通道 P99 延迟 {{ $value | humanizeDuration }}，超过 30 秒"
+
+      # Token 消耗速率异常（防止恶意刷单导致烧钱）
+      - alert: AgentTokenSpendBurst
+        expr: rate(agent_tokens_total[5m]) > 5000
+        for: 5m
+        labels:
+          severity: critical
+          category: cost
+          service: agent-service
+        annotations:
+          summary: "AI Agent token 消耗速率异常"
+          description: "{{ $labels.channel }} 通道 5 分钟内 token 速率 {{ $value | humanize }}/秒，怀疑被刷，请立即检查"
+
+      # 工具调用失败率高
+      - alert: AgentToolCallFailureRate
+        expr: |
+          (
+            rate(agent_tool_calls_total{status="error"}[5m])
+            /
+            (rate(agent_tool_calls_total[5m]) + 0.001)
+          ) > 0.2
+        for: 3m
+        labels:
+          severity: warning
+          category: business
+          service: agent-service
+        annotations:
+          summary: "AI Agent 工具调用失败率过高"
+          description: "工具 {{ $labels.tool }} 失败率 {{ $value | humanizePercentage }}，超过 20%，下游服务可能异常"
