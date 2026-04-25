@@ -267,7 +267,15 @@ public class SeckillService {
     public Integer getStock(Long seckillProductId) {
         String stockKey = SECKILL_STOCK_KEY + seckillProductId;
         String stock = stringRedisTemplate.opsForValue().get(stockKey);
-        return stock != null ? Integer.parseInt(stock) : 0;
+        if (stock == null) {
+            return null;  // key 不存在，返回 null 以触发懒加载逻辑
+        }
+        try {
+            return Integer.parseInt(stock);
+        } catch (NumberFormatException e) {
+            log.warn("Redis 库存格式异常: key={}, value={}", stockKey, stock);
+            return null;
+        }
     }
 
     // ==================== 商品列表查询 ====================
@@ -495,13 +503,21 @@ public class SeckillService {
     }
 
     public boolean submitSeckillOrder(Long userId, Long seckillProductId, Integer quantity, String messageId) {
+        // 把 seckillProductId 解析成真实的商品 ID（订单服务需要 product_id 而非 seckill_product_id）
+        SeckillProduct seckillProduct = seckillProductMapper.selectById(seckillProductId);
+        if (seckillProduct == null) {
+            log.error("秒杀商品不存在，无法提交订单: seckillProductId={}, messageId={}", seckillProductId, messageId);
+            return false;
+        }
+        Long realProductId = seckillProduct.getProductId();
+
         String url = UriComponentsBuilder.fromHttpUrl(orderServiceUrl)
                 .path("/api/order/create/seckill")
                 .toUriString();
 
         Map<String, Object> request = new HashMap<>();
         request.put("userId", userId);
-        request.put("productId", seckillProductId);
+        request.put("productId", realProductId);
         request.put("quantity", quantity);
         request.put("messageId", messageId);
 
@@ -509,8 +525,8 @@ public class SeckillService {
             restTemplate.postForObject(url, request, Map.class);
             return true;
         } catch (Exception exception) {
-            log.error("调用订单服务失败: messageId={}, userId={}, seckillProductId={}",
-                    messageId, userId, seckillProductId, exception);
+            log.error("调用订单服务失败: messageId={}, userId={}, seckillProductId={}, realProductId={}",
+                    messageId, userId, seckillProductId, realProductId, exception);
             return false;
         }
     }
