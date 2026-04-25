@@ -32,6 +32,10 @@
           <el-icon><Lightning /></el-icon>
           <span>秒杀管理</span>
         </el-menu-item>
+        <el-menu-item index="/admin/ai-insights">
+          <el-icon><MagicStick /></el-icon>
+          <span>AI 经营助手</span>
+        </el-menu-item>
       </el-menu>
     </aside>
 
@@ -76,7 +80,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Odometer, Goods, List, Lightning, SwitchButton } from '@element-plus/icons-vue'
+import { Odometer, Goods, List, Lightning, MagicStick, SwitchButton } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAdminStore } from '../store/admin'
 import api from '../api'

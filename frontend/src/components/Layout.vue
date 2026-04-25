@@ -74,6 +74,9 @@
         <p>&copy; 2026 电商平台 - 微服务架构演示</p>
       </div>
     </footer>
+
+    <!-- AI 购物助手浮动入口（仅登录后显示）-->
+    <AgentChat v-if="userStore.token" />
   </div>
 </template>
 
@@ -83,6 +86,7 @@ import { Search, ShoppingCart } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '../store/user'
 import { useCartStore } from '../store/cart'
+import AgentChat from './AgentChat.vue'
 
 const router = useRouter()
 const userStore = useUserStore()

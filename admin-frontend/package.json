@@ -15,7 +15,8 @@
     "axios": "^1.6.0",
     "element-plus": "^2.5.0",
     "@element-plus/icons-vue": "^2.3.0",
-    "echarts": "^5.5.0"
+    "echarts": "^5.5.0",
+    "mermaid": "^11.4.1"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.0",
