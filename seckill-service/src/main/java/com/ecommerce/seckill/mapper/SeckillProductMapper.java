@@ -21,6 +21,10 @@ public interface SeckillProductMapper extends BaseMapper<SeckillProduct> {
     /**
      * 批量查询进行中的秒杀商品（用于 Redis -> MySQL 定时同步）
      */
-    @Select("SELECT * FROM seckill_product WHERE status = 1 AND start_time &lt;= NOW() AND end_time &gt;= NOW()")
+    @Select("SELECT * FROM seckill_product WHERE status = 1 AND start_time <= NOW() AND end_time >= NOW()")
     List<SeckillProduct> selectActiveProductsForSync();
+    /**
+     * 根据 activityId 查询秒杀商品
+     */
+    SeckillProduct selectByActivityId(@Param("activityId") Long activityId);
 }

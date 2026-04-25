@@ -7,12 +7,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
-import org.springframework.web.util.UriComponentsBuilder;
 
 import jakarta.annotation.PostConstruct;
 import java.time.LocalDateTime;
-import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -28,12 +25,13 @@ import java.util.concurrent.atomic.AtomicLong;
 public class SeckillCacheService {
 
     private static final String PRODUCT_EXISTS_CACHE_KEY_PREFIX = "seckill:product:exists:";
+    private static final String SECKILL_STOCK_KEY_PREFIX = "seckill:stock:";
+    private static final String SECKILL_PRODUCT_CACHE_KEY = "seckill:cache:products:active";
     private static final int PRODUCT_EXISTS_CACHE_MINUTES = 30;   // 基础TTL
     private static final int PRODUCT_NOT_EXISTS_CACHE_MINUTES = 5; // 基础TTL
     private static final int CACHE_TTL_JITTER_MAX_MINUTES = 5;    // 随机偏移上限
 
     private final StringRedisTemplate stringRedisTemplate;
-    private final RestTemplate restTemplate;
     private final BloomFilterConfig bloomFilterConfig;
     private final SeckillProductMapper seckillProductMapper;
 
@@ -42,15 +40,10 @@ public class SeckillCacheService {
     private final AtomicLong bloomFilterHits = new AtomicLong(0);  // 布隆过滤器命中（可能存在）
     private final AtomicLong bloomFilterPasses = new AtomicLong(0); // 布隆过滤器通过（一定不存在，直接拒绝）
 
-    @Autowired(required = false)
-    private String productServiceUrl;
-
     public SeckillCacheService(StringRedisTemplate stringRedisTemplate,
-                               RestTemplate restTemplate,
                                BloomFilterConfig bloomFilterConfig,
                                SeckillProductMapper seckillProductMapper) {
         this.stringRedisTemplate = stringRedisTemplate;
-        this.restTemplate = restTemplate;
         this.bloomFilterConfig = bloomFilterConfig;
         this.seckillProductMapper = seckillProductMapper;
     }
@@ -110,35 +103,18 @@ public class SeckillCacheService {
         }
         cacheMisses.incrementAndGet();
 
-        // 第三层：远程服务验证
-        if (productServiceUrl == null) {
-            productServiceUrl = "http://localhost:8002";
-        }
-        String url = UriComponentsBuilder.fromHttpUrl(productServiceUrl)
-                .path("/api/product/{id}")
-                .buildAndExpand(seckillProductId)
-                .toUriString();
+        // 第三层：直接从本地数据库查询秒杀商品是否存在
         try {
-            Map<?, ?> response = restTemplate.getForObject(url, Map.class);
-            if (response == null) {
+            var product = seckillProductMapper.selectById(seckillProductId);
+            if (product != null) {
+                setExistsCache(cacheKey);
+                return true;
+            } else {
                 setNotExistsCache(cacheKey);
                 return false;
             }
-            setExistsCache(cacheKey);
-            return true;
-        } catch (org.springframework.web.client.HttpClientErrorException.NotFound notFound) {
-            setNotExistsCache(cacheKey);
-            return false;
-        } catch (org.springframework.web.client.HttpStatusCodeException exception) {
-            String body = exception.getResponseBodyAsString();
-            if (body != null && body.contains("商品不存在")) {
-                setNotExistsCache(cacheKey);
-                return false;
-            }
-            log.error("校验商品是否存在失败: seckillProductId={}", seckillProductId, exception);
-            return false;
         } catch (Exception exception) {
-            log.error("校验商品是否存在失败: seckillProductId={}", seckillProductId, exception);
+            log.error("查询秒杀商品是否存在失败: seckillProductId={}", seckillProductId, exception);
             return false;
         }
     }
@@ -178,5 +154,22 @@ public class SeckillCacheService {
 
     public long getBloomFilterPasses() {
         return bloomFilterPasses.get();
+    }
+
+    public void initStock(Long seckillProductId, Integer stock) {
+        if (stock == null) {
+            throw new IllegalArgumentException("库存不能为空");
+        }
+        if (stock < 0) {
+            throw new IllegalArgumentException("库存不能为负数");
+        }
+        String stockKey = SECKILL_STOCK_KEY_PREFIX + seckillProductId;
+        stringRedisTemplate.opsForValue().set(stockKey, String.valueOf(stock), 1L, TimeUnit.DAYS);
+        log.info("秒杀商品 {} 库存初始化为 {}", seckillProductId, stock);
+    }
+
+    public void clearProductCache() {
+        stringRedisTemplate.delete(SECKILL_PRODUCT_CACHE_KEY);
+        log.info("秒杀商品列表缓存已清除");
     }
 }

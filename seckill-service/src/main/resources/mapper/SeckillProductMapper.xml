@@ -8,8 +8,14 @@
             UPDATE seckill_product
             SET available_stock = #{item.availableStock}
             WHERE id = #{item.id}
-              AND available_stock &gt;= 0
         </foreach>
     </update>
+
+    <!-- 根据 activityId 查询秒杀商品 -->
+    <select id="selectByActivityId" resultType="com.ecommerce.seckill.entity.SeckillProduct">
+        SELECT * FROM seckill_product
+        WHERE activity_id = #{activityId}
+        LIMIT 1
+    </select>
 
 </mapper>

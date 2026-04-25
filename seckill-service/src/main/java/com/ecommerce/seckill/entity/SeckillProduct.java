@@ -32,4 +32,6 @@ public class SeckillProduct implements Serializable {
     private LocalDateTime endTime;
 
     private Integer status;
+
+    private Long activityId;
 }

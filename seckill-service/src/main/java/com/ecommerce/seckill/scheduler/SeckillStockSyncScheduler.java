@@ -15,6 +15,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 秒杀库存同步定时任务
@@ -83,7 +84,6 @@ public class SeckillStockSyncScheduler {
                 int rows = seckillProductMapper.update(null,
                         new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<com.ecommerce.seckill.entity.SeckillProduct>()
                                 .eq(com.ecommerce.seckill.entity.SeckillProduct::getId, productId)
-                                .ge(com.ecommerce.seckill.entity.SeckillProduct::getAvailableStock, 0)
                                 .set(com.ecommerce.seckill.entity.SeckillProduct::getAvailableStock, redisStock)
                 );
                 updatedCount += rows;
@@ -120,7 +120,7 @@ public class SeckillStockSyncScheduler {
                 if (Boolean.FALSE.equals(exists)) {
                     Integer stock = product.getAvailableStock();
                     if (stock != null && stock >= 0) {
-                        stringRedisTemplate.opsForValue().set(stockKey, String.valueOf(stock));
+                        stringRedisTemplate.opsForValue().set(stockKey, String.valueOf(stock), 1L, TimeUnit.DAYS);
                         restoredCount++;
                     }
                 }

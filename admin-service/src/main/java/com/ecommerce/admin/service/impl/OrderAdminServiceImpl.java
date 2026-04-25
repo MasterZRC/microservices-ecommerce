@@ -7,7 +7,9 @@ import com.ecommerce.admin.dto.common.PageResponse;
 import com.ecommerce.admin.dto.order.OrderResponse;
 import com.ecommerce.admin.dto.order.OrderStatusRequest;
 import com.ecommerce.admin.entity.Order;
+import com.ecommerce.admin.entity.User;
 import com.ecommerce.admin.mapper.OrderMapper;
+import com.ecommerce.admin.mapper.UserMapper;
 import com.ecommerce.admin.service.OrderAdminService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.cache.annotation.CacheEvict;
@@ -25,6 +27,7 @@ import java.util.stream.Collectors;
 public class OrderAdminServiceImpl implements OrderAdminService {
 
     private final OrderMapper orderMapper;
+    private final UserMapper userMapper;
 
     private static final Map<Integer, String> STATUS_MAP = new HashMap<>();
     static {
@@ -124,7 +127,8 @@ public class OrderAdminServiceImpl implements OrderAdminService {
         response.setId(order.getId());
         response.setOrderNo(order.getOrderNo());
         response.setUserId(order.getUserId());
-        response.setUserName(order.getUserName());
+        User user = userMapper.selectById(order.getUserId());
+        response.setUserName(user != null ? user.getUsername() : null);
         response.setTotalAmount(order.getTotalAmount());
         response.setStatus(order.getStatus());
         response.setStatusName(order.getStatusName() != null ? order.getStatusName() :

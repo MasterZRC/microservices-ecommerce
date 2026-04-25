@@ -7,6 +7,9 @@ spring:
       write-dates-as-timestamps: false
     deserialization:
       fail-on-unknown-properties: false
+    time-zone: Asia/Shanghai
+    modules:
+      - jackson-datatype-jsr310
   application:
     name: admin-service
   profiles:
@@ -60,9 +63,20 @@ sentinel:
   transport:
     dashboard: localhost:8080
 
+services:
+  seckill:
+    url: ${SECKILL_SERVICE_URL:http://localhost:8005}
+
 logging:
   level:
     com.ecommerce: info
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  logback:
+    rollingpolicy:
+      max-file-size: 100MB
+      max-history: 7
+      total-size-cap: 1GB
 
 management:
   endpoints:
