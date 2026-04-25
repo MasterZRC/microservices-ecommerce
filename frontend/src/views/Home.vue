@@ -80,7 +80,7 @@
                 </div>
               </div>
               <div class="hero-countdown" v-if="seckillEndTime">
-                <span class="countdown-label">距结束</span>
+                <span class="countdown-label">{{ seckillIsActive ? '距结束' : '距开始' }}</span>
                 <div class="countdown-time">
                   <el-countdown :value="seckillEndTime" format="HH:mm:ss" />
                 </div>
@@ -230,6 +230,7 @@ let exposureDebounceTimer = null
 // 秒杀相关数据
 const seckillProducts = ref([])
 const seckillEndTime = ref(null)
+const seckillIsActive = ref(false)  // true=进行中(距结束)，false=即将开始(距开始)
 const seckillLoading = ref(false)
 
 // 分类相关
@@ -370,32 +371,43 @@ onMounted(async () => {
 async function loadSeckillData() {
   seckillLoading.value = true
   try {
-    // 获取进行中的秒杀活动
-    const [activityRes, productsRes] = await Promise.all([
+    // 获取进行中的秒杀活动 + 商品（并行）
+    const [activityRes, activeProductsRes, upcomingProductsRes] = await Promise.all([
       api.getSeckillActivity(),
-      api.getSeckillProducts()
+      api.getSeckillProducts(),
+      api.getUpcomingSeckillProducts(3)
     ])
 
-    // 设置结束时间
-    if (activityRes.data?.hasActiveActivity && activityRes.data?.endTime) {
-      seckillEndTime.value = new Date(activityRes.data.endTime).getTime()
-    } else {
-      seckillEndTime.value = null
+    const hasActive = activityRes.data?.hasActiveActivity === true
+    const activeProducts = activeProductsRes.data?.products || []
+    const upcomingProducts = upcomingProductsRes.data?.products || []
+
+    let displayProducts = []
+
+    if (hasActive && activeProducts.length > 0) {
+      // 有进行中活动：显示商品 + 距结束倒计时
+      seckillEndTime.value = activityRes.data?.endTime
+        ? new Date(activityRes.data.endTime).getTime()
+        : null
+      seckillIsActive.value = true
+      displayProducts = activeProducts.slice(0, 3)
+    } else if (upcomingProducts.length > 0) {
+      // 无进行中活动但有即将开始：显示即将开始商品 + 距开始倒计时
+      seckillEndTime.value = upcomingProducts[0].startTime
+        ? new Date(upcomingProducts[0].startTime).getTime()
+        : null
+      seckillIsActive.value = false
+      displayProducts = upcomingProducts.slice(0, 3)
     }
 
-    // 获取秒杀商品列表
-    let products = productsRes.data?.products || []
-    if (products.length === 0) {
-      // 如果没有进行中的秒杀，获取即将开始的
-      const upcomingRes = await api.getUpcomingSeckillProducts(3)
-      products = upcomingRes.data?.products || []
-    }
-
-    // 处理商品数据，计算折扣
-    if (products.length > 0) {
-      seckillProducts.value = products.slice(0, 3).map(item => {
-        const originalPrice = Number(item.seckillPrice) * 1.5 // 估算原价
-        const discount = Math.round((1 - Number(item.seckillPrice) / originalPrice) * 100)
+    // 处理商品数据（不估算原价，使用后端真实数据）
+    if (displayProducts.length > 0) {
+      seckillProducts.value = displayProducts.map(item => {
+        const seckillPrice = Number(item.seckillPrice) || 0
+        const originalPrice = Number(item.originalPrice) || (seckillPrice * 1.5)
+        const discount = originalPrice > 0
+          ? Math.round((1 - seckillPrice / originalPrice) * 100)
+          : -30
         return {
           ...item,
           originalPrice: originalPrice.toFixed(2),
@@ -403,13 +415,11 @@ async function loadSeckillData() {
         }
       })
     } else {
-      // 如果没有任何秒杀数据，清空
       seckillProducts.value = []
       seckillEndTime.value = null
     }
   } catch (error) {
     console.error('加载秒杀数据失败:', error)
-    // 出错时清空数据，避免显示旧数据
     seckillProducts.value = []
     seckillEndTime.value = null
   } finally {

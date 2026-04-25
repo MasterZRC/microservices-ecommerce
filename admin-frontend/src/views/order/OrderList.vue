@@ -27,23 +27,24 @@
 
     <!-- Table -->
     <div class="table-card neo-panel">
-      <el-table :data="orders" v-loading="loading">
-        <el-table-column prop="orderNo" label="订单号" width="200" />
-        <el-table-column prop="userName" label="用户" width="100" />
-        <el-table-column prop="totalAmount" label="金额" width="120">
+      <!-- 不使用 fixed 列：fixed 会拆成主表+固定表，配合 width:100% 时主表列宽常小于容器，右侧出现大块条纹空白 -->
+      <el-table :data="orders" v-loading="loading" class="order-table">
+        <el-table-column prop="orderNo" label="订单号" min-width="200" show-overflow-tooltip />
+        <el-table-column prop="userName" label="用户" min-width="100" show-overflow-tooltip />
+        <el-table-column prop="totalAmount" label="金额" min-width="110">
           <template #default="{ row }">
             <span class="amount">¥{{ row.totalAmount }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="statusName" label="状态" width="100">
+        <el-table-column prop="statusName" label="状态" min-width="100">
           <template #default="{ row }">
             <el-tag :type="getStatusType(row.status)" size="small">{{ row.statusName }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="receiverName" label="收货人" width="100" />
-        <el-table-column prop="receiverPhone" label="电话" width="130" />
-        <el-table-column prop="createTime" label="下单时间" width="160" />
-        <el-table-column label="操作" width="120" fixed="right">
+        <el-table-column prop="receiverName" label="收货人" min-width="100" />
+        <el-table-column prop="receiverPhone" label="电话" min-width="120" />
+        <el-table-column prop="createTime" label="下单时间" min-width="180" show-overflow-tooltip />
+        <el-table-column label="操作" width="120" align="center">
           <template #default="{ row }">
             <el-button type="primary" @click="$router.push(`/admin/orders/${row.id}`)">详情</el-button>
           </template>
@@ -104,6 +105,7 @@ onMounted(() => {
 <style scoped>
 .order-list {
   max-width: 1200px;
+  width: 100%;
 }
 
 .page-head {
@@ -124,12 +126,19 @@ onMounted(() => {
 
 .table-card {
   padding: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .table-card :deep(.el-table) {
   border-radius: 0;
   border: none;
+}
+
+/* 让表格在容器内拉满宽度，由 Element Plus 按 min-width 分配多余列宽（勿对内部 table 强设 table-layout:fixed，会与 fixed 列/colgroup 冲突） */
+.order-table {
+  width: 100%;
 }
 
 .amount {

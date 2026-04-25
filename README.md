@@ -96,10 +96,31 @@
 
 可观测 + 流量控制是微服务从 demo 到生产的最后一步。
 
-**监控体系：Prometheus + Grafana**
+**监控体系：Prometheus + Grafana + SkyWalking + Loki**
+
+| 组件 | 端口 | 作用 |
+|------|------|------|
+| Prometheus | 9090 | 指标采集与存储 |
+| Grafana | 3001 | 监控看板可视化 |
+| SkyWalking | 8082 | 分布式链路追踪 |
+| Loki | 3100 | 日志聚合与搜索 |
+| AlertManager | 9093 | 告警通知 |
 
 - Spring Boot Micrometer 覆盖 QPS、延迟、错误率、JVM 内存
-- Grafana 预置 `Microservices Overview`（全局健康）+ `Seckill Overview`（秒杀专项）两个看板
+- Grafana 预置 `Microservices Overview`（全局健康）、`Seckill Overview`（秒杀专项）、`Alerts Overview`（告警监控）三个看板
+- SkyWalking 无侵入式链路追踪，可视化服务拓扑和完整调用链
+- Loki 日志聚合，支持 `{service="seckill-service", level="ERROR"}` 标签过滤
+
+**告警体系：Prometheus AlertManager + 自定义规则**
+
+| 告警名称 | 触发条件 | 严重级别 |
+|---------|---------|---------|
+| ServiceDown | 服务宕机超过1分钟 | 严重 |
+| HighLatencyP95 | P95延迟超过2秒 | 警告 |
+| SeckillSuccessRateLow | 秒杀成功率低于80% | 警告 |
+| SeckillQueueBacklog | 队列积压超过1000条 | 严重 |
+| RecommendationTimeout | 排序P99超过5秒 | 警告 |
+| OrderFailureRateHigh | 订单失败率超过5% | 警告 |
 
 **灰度发布：A/B Testing + 一致性哈希**
 
@@ -123,9 +144,12 @@ docker compose up -d --build
 cd frontend && npm install && npm run dev
 
 # 4. 访问
-#   前端：http://localhost:5173
+#   前端：http://localhost:80
 #   Swagger：http://localhost:8080/swagger-ui.html
 #   Grafana：http://localhost:3001 （admin / admin123）
+#   SkyWalking：http://localhost:8082 （链路追踪）
+#   AlertManager：http://localhost:9093 （告警配置）
+#   Elasticsearch：http://localhost:9200 （数据存储）
 ```
 
 首次启动自动执行 SQL 初始化脚本。MySQL / Redis / Nacos 已内置于 docker-compose，无需单独安装。
@@ -134,7 +158,7 @@ cd frontend && npm install && npm run dev
 
 ## 技术栈
 
-Spring Cloud Alibaba · Spring Boot 3.x · MyBatis-Plus · Python 3.10 · FastAPI · PyTorch · Redis 7.2 · MySQL 8.0 · Nacos 2.3.0 · Sentinel · Docker Compose
+Spring Cloud Alibaba · Spring Boot 3.x · MyBatis-Plus · Python 3.10 · FastAPI · PyTorch · Redis 7.2 · MySQL 8.0 · Nacos 2.3.0 · Sentinel · Docker Compose · SkyWalking 9.x · Loki · Prometheus · AlertManager
 
 ---
 
@@ -227,9 +251,18 @@ microservices-ecommerce/
 │   ├── mysql/
 │   │   ├── init/                    # SQL 初始化脚本（表结构 + 初始数据）
 │   │   └── conf/custom.cnf         # MySQL 配置（utf8mb4）
+│   ├── loki/                        # Loki 日志聚合配置
+│   │   ├── loki.yml                 # Loki 服务配置
+│   │   └── promtail.yml             # Promtail 日志采集配置
 │   └── monitoring/
-│       ├── prometheus/prometheus.yml             # 指标采集配置
-│       └── grafana/provisioning/                 # 数据源 + 看板自动配置
+│       ├── prometheus/
+│       │   ├── prometheus.yml       # 指标采集配置
+│       │   └── rules/alerts.yml     # 告警规则（秒杀/推荐/服务健康）
+│       ├── grafana/provisioning/    # Grafana 自动配置
+│       │   ├── datasources/         # 数据源（Prometheus + Loki）
+│       │   └── dashboards/json/    # 监控看板（3个）
+│       └── alertmanager/            # AlertManager 告警配置
+│           └── alertmanager.yml     # 告警路由和接收器配置
 │
 ├── scripts/loadtest/               # 并发压测脚本
 │   └── p1-seckill-regression.mjs    # 秒杀并发回归（输出成功率、延迟、库存一致性）
