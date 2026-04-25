@@ -128,6 +128,24 @@
 - HyperLogLog 低内存统计指标（~12KB/指标，误差 ~0.81%），不干扰业务性能
 - 支持创建实验、查看分组、对比 CTR / 加购率 / 下单率
 
+### AI Agent（双端对话式助手）
+
+基于通义千问 + Function Calling 的对话能力，独立微服务 `agent-service:8011`：
+
+| 端 | 入口 | 能力 |
+|---|---|---|
+| 用户端 | 右下角悬浮气泡 🤖 | 自然语言找商品、个性化推荐、加入购物车、生成订单预览（确认下单仍走原 `/api/order/create`） |
+| 管理端 | 左侧菜单「AI 经营助手」 | 查销售/订单/曝光/点击/取消率，支持自然语言提问 + 受限只读 SQL，输出表格 + mermaid 图表 + 解读 |
+
+工程亮点：
+- **绝不自动下单**：工具集只暴露 `prepare_order_preview`，所有真实下单都需用户在前端二次确认
+- **受限 SQL 三重防御**：sqlparse 语法检查 + 表白名单（仅 8 张业务表）+ admin-service 端正则二次拦截
+- **配额防失控**：Redis 每用户每日配额 + Prometheus token 速率告警（默认 user 100/admin 300）
+- **流式 SSE**：fetch + ReadableStream，全链路禁缓冲，token 即时送达
+- **可观测**：4 条专属告警（错误率/P99/Token 突增/工具失败率）+ Grafana `AI Agent Overview` 看板
+
+详见 [docs/agent-architecture.md](docs/agent-architecture.md)。
+
 ---
 
 ## 快速启动
@@ -135,21 +153,19 @@
 ```bash
 # 1. 克隆 & 配置
 git clone https://github.com/YOUR_USERNAME/microservices-ecommerce.git
-cp .env.example .env   # 编辑 JWT_SECRET 等字段
+cp .env.example .env   # 编辑 JWT_SECRET 与 DASHSCOPE_API_KEY（启用 AI Agent 必填）
 
-# 2. 一键启动（包含所有服务 + 监控栈）
+# 2. 一键启动（包含所有服务 + 监控栈 + Agent）
 docker compose up -d --build
 
-# 3. 启动前端
-cd frontend && npm install && npm run dev
-
-# 4. 访问
-#   前端：http://localhost:80
+# 3. 访问
+#   用户前端：http://localhost                     （登录后右下角 🤖 是 AI 购物助手）
+#   管理后台：http://localhost:8081                （登录后左侧菜单 AI 经营助手）
 #   Swagger：http://localhost:8080/swagger-ui.html
-#   Grafana：http://localhost:3001 （admin / admin123）
-#   SkyWalking：http://localhost:8082 （链路追踪）
-#   AlertManager：http://localhost:9093 （告警配置）
-#   Elasticsearch：http://localhost:9200 （数据存储）
+#   Grafana：http://localhost:3001                 （admin / admin123）
+#   SkyWalking：http://localhost:8082              （链路追踪）
+#   AlertManager：http://localhost:9093            （告警配置）
+#   AI Agent 健康：http://localhost:8080/api/agent/health
 ```
 
 首次启动自动执行 SQL 初始化脚本。MySQL / Redis / Nacos 已内置于 docker-compose，无需单独安装。
@@ -158,7 +174,7 @@ cd frontend && npm install && npm run dev
 
 ## 技术栈
 
-Spring Cloud Alibaba · Spring Boot 3.x · MyBatis-Plus · Python 3.10 · FastAPI · PyTorch · Redis 7.2 · MySQL 8.0 · Nacos 2.3.0 · Sentinel · Docker Compose · SkyWalking 9.x · Loki · Prometheus · AlertManager
+Spring Cloud Alibaba · Spring Boot 3.x · MyBatis-Plus · Python 3.11 · FastAPI · PyTorch · DashScope (qwen-plus) · Redis 7.2 · MySQL 8.0 · Nacos 2.3.0 · Sentinel · Docker Compose · SkyWalking 9.x · Loki · Prometheus · AlertManager · Mermaid
 
 ---
 
