@@ -813,8 +813,12 @@ class SequenceFeatureBuilder:
     """
 
     def __init__(self, db_config: Dict = None):
+        # 默认 host 走环境变量 MYSQL_HOST（容器内默认 docker network DNS 名 mysql/ecommerce-mysql）
+        # 本地开发时可设置 MYSQL_HOST=localhost
+        import os
+        default_host = os.environ.get("MYSQL_HOST", "ecommerce-mysql")
         self.db_config = db_config or {
-            "host": "localhost",
+            "host": default_host,
             "port": 3306,
             "user": "root",
             "password": "root123",

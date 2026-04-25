@@ -508,9 +508,13 @@ class DeepFMAttentionRanker:
                 prefer_category = user_features.get("prefer_category")
                 if isinstance(prefer_category, list):
                     prefer_category = prefer_category[0] if prefer_category else 0
+                if prefer_category is None:
+                    prefer_category = 0
                 prefer_brand = user_features.get("prefer_brand")
                 if isinstance(prefer_brand, list):
                     prefer_brand = prefer_brand[0] if prefer_brand else 0
+                if prefer_brand is None:
+                    prefer_brand = 0
 
                 sparse = [
                     min(int(user_features.get("view_1d", 0)) // 10, 9),
