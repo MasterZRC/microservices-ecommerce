@@ -113,6 +113,26 @@ api.interceptors.request.use(config => {
   return config
 })
 
+// 401 后避免重复触发跳转/通知
+let unauthorizedNotified = false
+
+function handleUnauthorized() {
+  if (unauthorizedNotified) return
+  unauthorizedNotified = true
+  try {
+    localStorage.removeItem('token')
+    localStorage.removeItem('userInfo')
+  } catch (_) {}
+  // 仅当当前不在登录/注册页时才跳转，避免循环
+  const path = window.location.pathname
+  if (path !== '/login' && path !== '/register') {
+    // 用 location 而不是 router 是为了清空所有 store/缓存
+    window.location.href = '/login?redirect=' + encodeURIComponent(path + window.location.search)
+  }
+  // 5 秒后允许再次提示，便于多 tab 场景
+  setTimeout(() => { unauthorizedNotified = false }, 5000)
+}
+
 api.interceptors.response.use(
   response => ({
     ...response,
@@ -121,6 +141,10 @@ api.interceptors.response.use(
   error => {
     if (error?.response?.data) {
       error.response.data = normalizePossibleMojibake(error.response.data)
+    }
+    // token 过期 / 无效：清掉本地凭据并跳转登录
+    if (error?.response?.status === 401) {
+      handleUnauthorized()
     }
     return Promise.reject(error)
   }

@@ -7,11 +7,19 @@ export const useCartStore = defineStore('cart', () => {
   const cartCount = ref(0)
 
   async function fetchCartCount(userId) {
+    // 未登录直接置零，避免无 token 调用产生 401
+    if (!userId || !localStorage.getItem('token')) {
+      cartCount.value = 0
+      return
+    }
     try {
       const res = await api.getCartCount(userId)
       cartCount.value = res.data
     } catch (e) {
-      console.error('获取购物车数量失败', e)
+      // 401 已由 axios 拦截器统一处理（清理凭据并跳转登录），此处仅记录其他错误
+      if (e?.response?.status !== 401) {
+        console.error('获取购物车数量失败', e)
+      }
     }
   }
 
