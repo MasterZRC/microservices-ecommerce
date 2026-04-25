@@ -418,7 +418,9 @@ services:
     ports:
       - "8082:8080"
     environment:
-      SW_OAP_ADDRESS: http://skywalking-oap:11800
+      # OAP 暴露两个端口：11800=gRPC（agent 上报）/ 12800=HTTP REST + GraphQL（UI 查询）
+      # UI 必须走 12800，否则 GraphQL 请求会被 gRPC 服务器拒绝为 415 Unsupported Media Type
+      SW_OAP_ADDRESS: http://skywalking-oap:12800
     depends_on:
       skywalking-oap:
         condition: service_started
