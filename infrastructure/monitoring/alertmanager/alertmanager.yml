@@ -1,0 +1,58 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'service', 'severity']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 12h
+  receiver: 'default'
+  routes:
+    # 严重告警直接通知
+    - match:
+        severity: critical
+      receiver: 'critical-alert'
+      continue: true
+    # 秒杀服务告警单独通知
+    - match:
+        service: seckill-service
+      receiver: 'seckill-alert'
+      continue: true
+    # 推荐服务告警
+    - match:
+        service: recommendation-service
+      receiver: 'recommendation-alert'
+      continue: true
+
+receivers:
+  # 默认接收器 - webhook 到后台管理系统
+  - name: 'default'
+    webhook_configs:
+      - url: 'http://admin-service:8006/api/alert/webhook'
+        send_resolved: true
+
+  # 严重告警
+  - name: 'critical-alert'
+    webhook_configs:
+      - url: 'http://admin-service:8006/api/alert/webhook'
+        send_resolved: true
+
+  # 秒杀服务告警
+  - name: 'seckill-alert'
+    webhook_configs:
+      - url: 'http://admin-service:8006/api/alert/webhook'
+        send_resolved: true
+
+  # 推荐服务告警
+  - name: 'recommendation-alert'
+    webhook_configs:
+      - url: 'http://admin-service:8006/api/alert/webhook'
+        send_resolved: true
+
+inhibit_rules:
+  # 当服务完全宕机时，抑制该服务的其他告警
+  - source_match:
+      alertname: 'ServiceDown'
+    target_match_re:
+      alertname: 'HighLatency|ErrorRateHigh'
+    equal: ['service']

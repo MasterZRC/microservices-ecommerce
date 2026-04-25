@@ -260,4 +260,94 @@ public class RecommendationMetricsService {
         recordRecallChannel("category", categoryCount);
         recordRecallChannel("content", contentCount);
     }
+
+    // ==================== 额外指标（可观测性增强） ====================
+
+    // 推荐结果空率指标（用于告警）
+    private final AtomicInteger emptyResultCount = new AtomicInteger(0);
+    private final AtomicInteger totalRequestCount = new AtomicInteger(0);
+
+    // 在线学习指标
+    private Counter onlineLearningUpdateCounter;
+    private Counter onlineLearningErrorCounter;
+
+    // 商品曝光指标
+    private Counter productExposureCounter;
+
+    @PostConstruct
+    public void initAdditionalMetrics() {
+        // 初始化额外指标
+        onlineLearningUpdateCounter = Counter.builder("recommendation_online_learning_updates_total")
+                .description("在线学习更新次数")
+                .tag("type", "incremental")
+                .register(meterRegistry);
+
+        onlineLearningErrorCounter = Counter.builder("recommendation_online_learning_errors_total")
+                .description("在线学习错误次数")
+                .tag("type", "error")
+                .register(meterRegistry);
+
+        productExposureCounter = Counter.builder("recommendation_product_exposure_total")
+                .description("商品曝光次数")
+                .register(meterRegistry);
+
+        // 空结果率 Gauge
+        Gauge.builder("recommendation_empty_result_ratio", this, service -> {
+            int total = totalRequestCount.get();
+            if (total == 0) return 0.0;
+            return (double) emptyResultCount.get() / total;
+        }).description("推荐结果空率")
+                .register(meterRegistry);
+
+        log.info("[Metrics] 推荐服务额外指标初始化完成");
+    }
+
+    /**
+     * 记录推荐结果为空（冷启动）
+     */
+    public void recordEmptyResult() {
+        emptyResultCount.incrementAndGet();
+    }
+
+    /**
+     * 记录总请求数（用于计算空率）
+     */
+    public void recordTotalRequest() {
+        totalRequestCount.incrementAndGet();
+    }
+
+    /**
+     * 记录在线学习更新
+     */
+    public void recordOnlineLearningUpdate() {
+        onlineLearningUpdateCounter.increment();
+    }
+
+    /**
+     * 记录在线学习错误
+     */
+    public void recordOnlineLearningError() {
+        onlineLearningErrorCounter.increment();
+    }
+
+    /**
+     * 记录商品曝光
+     */
+    public void recordProductExposure(int count) {
+        productExposureCounter.increment(count);
+    }
+
+    /**
+     * 获取空结果数
+     */
+    public int getEmptyResultCount() {
+        return emptyResultCount.get();
+    }
+
+    /**
+     * 获取总请求数
+     */
+    public int getTotalRequestCount() {
+        return totalRequestCount.get();
+    }
 }
