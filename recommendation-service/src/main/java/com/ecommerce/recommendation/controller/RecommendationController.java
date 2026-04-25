@@ -298,21 +298,14 @@ public class RecommendationController {
     @GetMapping("/gray/status")
     @Operation(
         summary = "获取灰度发布状态",
-        description = "查询灰度开关是否开启，以及灰度流量比例"
+        description = "查询灰度开关是否开启，以及灰度流量比例（公开接口，已加入网关白名单）"
     )
     @ApiResponses({
-        @ApiResponse(responseCode = "200", description = "查询成功"),
-        @ApiResponse(responseCode = "401", description = "用户未登录")
+        @ApiResponse(responseCode = "200", description = "查询成功")
     })
-    public ResponseEntity<Map<String, Object>> getGrayStatus(
-            @Parameter(description = "网关认证用户ID（内部使用）", hidden = true)
-            @RequestHeader(value = HEADER_AUTH_USER_ID, required = false) Long authUserId) {
-        if (authUserId == null) {
-            return ResponseEntity.status(401).body(Map.of(
-                    "code", 401,
-                    "message", "请先登录"
-            ));
-        }
+    public ResponseEntity<Map<String, Object>> getGrayStatus() {
+        // 该接口仅返回全局灰度配置，与用户身份无关；网关已将其加入 EXCLUDED_PATHS 白名单
+        // 因此不再校验 X-Authenticated-User-Id
         Map<String, Object> result = new HashMap<>();
         result.put("enabled", grayReleaseService.isGrayEnabled());
         result.put("ratio", grayReleaseService.getGrayRatio());

@@ -37,6 +37,8 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
 
     public static final String HEADER_USER_ID = "X-Authenticated-User-Id";
     public static final String HEADER_USER_ROLE = "X-Authenticated-User-Role";
+    /** admin-service 控制器仍按历史习惯读取 X-Admin-Id，本过滤器同步注入该 Header */
+    public static final String HEADER_ADMIN_ID = "X-Admin-Id";
 
     private static final List<String> EXCLUDED_PATHS = List.of(
             "/api/user/login",
@@ -52,6 +54,7 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
             "/api/seckill/products",
             "/api/seckill/products/upcoming",
             "/api/seckill/activity",
+            "/api/alert/webhook",
             "/health",
             "/actuator"
     );
@@ -88,10 +91,17 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
 
             // 将认证后的用户信息通过内部 Header 传递给下游服务
             // 下游服务必须使用此 Header 中的 userId，禁止信任前端传入的 userId 参数
-            ServerHttpRequest mutatedRequest = request.mutate()
+            ServerHttpRequest.Builder builder = request.mutate()
                     .header(HEADER_USER_ID, String.valueOf(userId))
-                    .header(HEADER_USER_ROLE, role != null ? role : "user")
-                    .build();
+                    .header(HEADER_USER_ROLE, role != null ? role : "user");
+            // 当 JWT 中含 adminId（admin-service 签发的 token），同步注入 X-Admin-Id 供管理端 controller 使用
+            Object adminIdClaim = claims.get("adminId");
+            if (adminIdClaim instanceof Number) {
+                builder.header(HEADER_ADMIN_ID, String.valueOf(((Number) adminIdClaim).longValue()));
+            } else if (adminIdClaim instanceof String) {
+                builder.header(HEADER_ADMIN_ID, (String) adminIdClaim);
+            }
+            ServerHttpRequest mutatedRequest = builder.build();
 
             ServerWebExchange mutatedExchange = exchange.mutate()
                     .request(mutatedRequest)

@@ -44,6 +44,10 @@ spring:
           uri: ${ADMIN_SERVICE_URL:http://admin-service:8006}
           predicates:
             - Path=/api/admin/**
+        - id: admin-service-alert
+          uri: ${ADMIN_SERVICE_URL:http://admin-service:8006}
+          predicates:
+            - Path=/api/alert/**
         - id: seckill-service
           uri: ${SECKILL_SERVICE_URL:http://localhost:8005}
           predicates:
@@ -67,6 +71,13 @@ jwt:
 logging:
   level:
     org.springframework.cloud.gateway: info
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  logback:
+    rollingpolicy:
+      max-file-size: 100MB
+      max-history: 7
+      total-size-cap: 1GB
 
 management:
   endpoints:
