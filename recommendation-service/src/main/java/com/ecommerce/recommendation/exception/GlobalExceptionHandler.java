@@ -48,6 +48,18 @@ public class GlobalExceptionHandler {
         return buildErrorResponse(HttpStatus.BAD_REQUEST, "BAD_REQUEST", message, request);
     }
 
+    /**
+     * 业务层 RuntimeException：把真实原因透传给调用方
+     */
+    @ExceptionHandler(RuntimeException.class)
+    public ResponseEntity<Map<String, Object>> handleRuntimeException(
+            RuntimeException exception,
+            HttpServletRequest request) {
+        String msg = exception.getMessage() == null ? "业务处理失败" : exception.getMessage();
+        log.warn("recommendation-service业务异常: path={}, msg={}", request.getRequestURI(), msg);
+        return buildErrorResponse(HttpStatus.BAD_REQUEST, "BUSINESS_ERROR", msg, request);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> handleException(
             Exception exception,

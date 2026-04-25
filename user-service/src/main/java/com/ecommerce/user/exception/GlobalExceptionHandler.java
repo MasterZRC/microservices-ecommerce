@@ -48,6 +48,19 @@ public class GlobalExceptionHandler {
         return buildErrorResponse(HttpStatus.BAD_REQUEST, "BAD_REQUEST", message, request);
     }
 
+    /**
+     * 处理业务层 RuntimeException（如 "用户不存在" / "密码错误" / "用户名已存在"）
+     * 这些是预期内的业务错误，需要把真实原因透传给调用方，而不是统一吞为「系统繁忙」
+     */
+    @ExceptionHandler(RuntimeException.class)
+    public ResponseEntity<Map<String, Object>> handleRuntimeException(
+            RuntimeException exception,
+            HttpServletRequest request) {
+        String msg = exception.getMessage() == null ? "业务处理失败" : exception.getMessage();
+        log.warn("user-service业务异常: path={}, msg={}", request.getRequestURI(), msg);
+        return buildErrorResponse(HttpStatus.BAD_REQUEST, "BUSINESS_ERROR", msg, request);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> handleException(
             Exception exception,
