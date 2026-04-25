@@ -85,7 +85,10 @@ def run_tool_loop(
 
         # 累积本轮 assistant 消息（content 增量 + tool_calls 增量）
         accumulated_content = ""
-        accumulated_tool_calls: List[Dict] = []
+        # tool_calls 增量合并：dashscope (OpenAI 兼容) 流式时，每个 chunk 的
+        # tool_calls 是 partial：{index, id?, type?, function: {name?, arguments?}},
+        # 其中 function.arguments 是字符串增量片段，需要按 index 拼接。
+        tc_buffer: Dict[int, Dict] = {}  # index -> {id, type, function:{name, arguments}}
         last_usage: Optional[Dict] = None
         last_finish_reason: Optional[str] = None
 
@@ -110,14 +113,32 @@ def run_tool_loop(
                 accumulated_content += delta_content
                 sse_emit("token", {"text": delta_content})
 
-            # incremental tool_calls
-            tool_calls = message.get("tool_calls")
-            if tool_calls:
-                # dashscope 增量返回时直接给完整 tool_calls 数组（不是 delta），覆盖即可
-                accumulated_tool_calls = tool_calls
+            # incremental tool_calls：按 index 累积（兼容 OpenAI/DashScope 增量协议）
+            for i, tc in enumerate(message.get("tool_calls") or []):
+                idx = tc.get("index", i)
+                slot = tc_buffer.setdefault(idx, {"id": "", "type": "function",
+                                                   "function": {"name": "", "arguments": ""}})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                if tc.get("type"):
+                    slot["type"] = tc["type"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    # 部分模型 name 也是分片增量；用追加更安全
+                    if not slot["function"]["name"]:
+                        slot["function"]["name"] = fn["name"]
+                    elif slot["function"]["name"] != fn["name"]:
+                        # 不一致时优先采用更长的（一般是后到的完整名）
+                        if len(fn["name"]) > len(slot["function"]["name"]):
+                            slot["function"]["name"] = fn["name"]
+                if "arguments" in fn and fn["arguments"]:
+                    slot["function"]["arguments"] += fn["arguments"]
 
             last_finish_reason = choice.get("finish_reason")
             last_usage = getattr(resp, "usage", None)
+
+        # 按 index 顺序拼回完整 tool_calls 列表
+        accumulated_tool_calls: List[Dict] = [tc_buffer[k] for k in sorted(tc_buffer.keys())]
 
         if last_usage:
             _record_token(channel, last_usage if isinstance(last_usage, dict) else dict(last_usage))
