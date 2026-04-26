@@ -7,8 +7,16 @@ def _env(key: str, default: str = "") -> str:
 
 
 # ===== 模型配置 =====
+_LLM_PROVIDER = _env("LLM_PROVIDER", "qwen").lower()
+LLM_PROVIDER = _LLM_PROVIDER if _LLM_PROVIDER in {"qwen", "deepseek"} else "qwen"
 DASHSCOPE_API_KEY = _env("DASHSCOPE_API_KEY")
 QWEN_MODEL = _env("QWEN_MODEL", "qwen-plus")
+DEEPSEEK_API_KEY = _env("DEEPSEEK_API_KEY")
+DEEPSEEK_MODEL = _env("DEEPSEEK_MODEL", "deepseek-v4-flash")
+DEEPSEEK_BASE_URL = _env("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+DEEPSEEK_THINKING = _env("DEEPSEEK_THINKING", "disabled").lower()
+if DEEPSEEK_THINKING not in {"enabled", "disabled"}:
+    DEEPSEEK_THINKING = "disabled"
 LLM_MAX_TOKENS = int(_env("LLM_MAX_TOKENS", "2048"))
 LLM_TEMPERATURE = float(_env("LLM_TEMPERATURE", "0.3"))
 TOOL_LOOP_MAX_STEPS = int(_env("TOOL_LOOP_MAX_STEPS", "8"))
@@ -40,4 +48,18 @@ ADMIN_DAILY_QUOTA = int(_env("AGENT_ADMIN_DAILY_QUOTA", "200"))
 
 
 def is_llm_configured() -> bool:
+    if LLM_PROVIDER == "deepseek":
+        return bool(DEEPSEEK_API_KEY)
     return bool(DASHSCOPE_API_KEY)
+
+
+def selected_model() -> str:
+    if LLM_PROVIDER == "deepseek":
+        return DEEPSEEK_MODEL
+    return QWEN_MODEL
+
+
+def selected_api_key_name() -> str:
+    if LLM_PROVIDER == "deepseek":
+        return "DEEPSEEK_API_KEY"
+    return "DASHSCOPE_API_KEY"

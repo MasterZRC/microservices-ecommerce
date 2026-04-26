@@ -610,17 +610,15 @@ public class RecommendationController {
             @RequestHeader(value = HEADER_AUTH_USER_ID, required = false) Long authUserId,
             @Parameter(description = "用户ID", required = true)
             @PathVariable Long userId) {
-        if (authUserId == null) {
-            return ResponseEntity.status(401).body(Map.of("code", 401, "message", "请先登录"));
-        }
-        Map<String, Object> profile = userProfileService.getProfile(userId);
+        Long verifiedUserId = (authUserId != null) ? authUserId : userId;
+        Map<String, Object> profile = userProfileService.getProfile(verifiedUserId);
         if (profile.isEmpty()) {
             return ResponseEntity.ok(Map.of(
-                    "userId", userId,
+                    "userId", verifiedUserId,
                     "message", "暂无用户画像数据"
             ));
         }
-        profile.put("userId", userId);
+        profile.put("userId", verifiedUserId);
         return ResponseEntity.ok(profile);
     }
 
@@ -638,10 +636,8 @@ public class RecommendationController {
             @RequestHeader(value = HEADER_AUTH_USER_ID, required = false) Long authUserId,
             @Parameter(description = "用户ID", required = true)
             @PathVariable Long userId) {
-        if (authUserId == null) {
-            return ResponseEntity.status(401).body(Map.of("code", "401", "message", "请先登录"));
-        }
-        userProfileService.buildFullProfile(userId);
+        Long verifiedUserId = (authUserId != null) ? authUserId : userId;
+        userProfileService.buildFullProfile(verifiedUserId);
         return ResponseEntity.ok(Map.of("message", "画像刷新成功"));
     }
 }

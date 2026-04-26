@@ -244,9 +244,12 @@ async function confirmOrder(card, msg) {
   card._submitting = true
   try {
     const submit = card.submit || {}
-    const resp = await api._raw
-      ? api._raw.post(submit.path, submit.body)
-      : await axiosFallbackPost(submit.path, submit.body)
+    const body = submit.body || {}
+    await ensureCartItems(card, body)
+    const submitPath = normalizeApiPath(submit.path || '/order/create')
+    const resp = api._raw
+      ? await api._raw.post(submitPath, body)
+      : await axiosFallbackPost(submitPath, body)
     // axios 默认会通过响应拦截器，这里再尝试 api 的 createOrder 路径
     const order = (resp && resp.data) || resp
     card._submitted = true
@@ -263,10 +266,44 @@ async function confirmOrder(card, msg) {
 
 // 由于 frontend/src/api/index.js 默认导出的是 wrapper，这里直接复用 axios 实例做 POST
 import axios from 'axios'
+function normalizeApiPath(path) {
+  const value = String(path || '/order/create').trim() || '/order/create'
+  return value.replace(/^\/api(?=\/)/, '')
+}
+async function ensureCartItems(card, orderBody) {
+  const userId = orderBody?.userId || userStore.userInfo?.id
+  const items = Array.isArray(orderBody?.items) ? orderBody.items : []
+  if (!userId || items.length === 0) return
+
+  const cartResp = await api.getCart(userId)
+  const cartItems = Array.isArray(cartResp?.data) ? cartResp.data : []
+  const cartQuantityByProduct = new Map(
+    cartItems.map(it => [Number(it.productId), Number(it.quantity || 0)])
+  )
+
+  for (const item of items) {
+    const productId = Number(item.productId)
+    const desiredQty = Number(item.quantity || 1)
+    const currentQty = cartQuantityByProduct.get(productId) || 0
+    const missingQty = Math.max(0, desiredQty - currentQty)
+    if (missingQty === 0) continue
+
+    const previewItem = (card?.preview?.items || []).find(it => Number(it.product_id) === productId) || {}
+    await api.addToCart({
+      userId,
+      productId,
+      productName: previewItem.product_name || '',
+      productImage: previewItem.product_image || '',
+      quantity: missingQty
+    })
+    cartQuantityByProduct.set(productId, currentQty + missingQty)
+  }
+}
 async function axiosFallbackPost(path, body) {
   const baseURL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '')
   const token = localStorage.getItem('token') || ''
-  return await axios.post(`${baseURL}${path}`, body, {
+  const submitPath = normalizeApiPath(path)
+  return await axios.post(`${baseURL}${submitPath}`, body, {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     timeout: 10000
   })
