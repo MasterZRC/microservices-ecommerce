@@ -2,8 +2,10 @@ package com.ecommerce.seckill.service;
 
 import com.alibaba.fastjson2.JSON;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.ecommerce.seckill.dto.SeckillAttemptResult;
 import com.ecommerce.seckill.entity.SeckillProduct;
 import com.ecommerce.seckill.mapper.SeckillProductMapper;
+import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -51,6 +53,9 @@ public class SeckillService {
     @Autowired
     private SeckillCacheService seckillCacheService;
 
+    @Autowired(required = false)
+    private SeckillMetricsService seckillMetricsService;
+
     @Autowired
     private RestTemplate restTemplate;
 
@@ -82,10 +87,22 @@ public class SeckillService {
      * 使用 Redis Lua 原子脚本：限流 + 幂等 + 库存检查 + 扣减库存
      */
     public boolean trySeckill(Long userId, Long seckillProductId, Integer quantity) {
+        return attemptSeckill(userId, seckillProductId, quantity).isSuccess();
+    }
+
+    public SeckillAttemptResult attemptSeckill(Long userId, Long seckillProductId, Integer quantity) {
+        recordMetricRequest();
+        Timer.Sample sample = startMetricTimer();
         if (!seckillCacheService.productExists(seckillProductId)) {
             log.warn("商品不存在，拒绝秒杀请求: userId={}, seckillProductId={}", userId, seckillProductId);
             seckillFailCount.incrementAndGet();
-            return false;
+            recordMetricFailure("product_not_found");
+            stopMetricTimer(sample);
+            return SeckillAttemptResult.failure(
+                    SeckillAttemptResult.PRODUCT_NOT_FOUND,
+                    "product_not_found",
+                    "Seckill product does not exist"
+            );
         }
 
         // 单用户单次最多购买10件，防止恶意刷单
@@ -124,16 +141,24 @@ public class SeckillService {
             if (result == null) {
                 log.warn("秒杀脚本执行失败: userId={}, seckillProductId={}", userId, seckillProductId);
                 seckillFailCount.incrementAndGet();
-                return false;
+                recordMetricLuaError();
+                recordMetricFailure("script_error");
+                return SeckillAttemptResult.failure(
+                        SeckillAttemptResult.SCRIPT_ERROR,
+                        "script_error",
+                        "Redis Lua script returned no result"
+                );
             }
 
             if (result == 1L) {
                 enqueueOrderEvent(userId, seckillProductId, buyQuantity);
                 seckillSuccessCount.incrementAndGet();
+                recordMetricSuccess();
                 log.info("用户 {} 秒杀成功，商品 {}，数量 {}", userId, seckillProductId, buyQuantity);
-                return true;
+                return SeckillAttemptResult.success();
             }
 
+            String failureReason = failureReason(result);
             if (result == -1L) {
                 log.warn("用户 {} 已参与过秒杀", userId);
             } else if (result == -2L) {
@@ -143,22 +168,109 @@ public class SeckillService {
             } else if (result == -4L) {
                 log.warn("商品 {} 触发限流", seckillProductId);
                 rateLimitRejects.incrementAndGet();
+                recordMetricRateLimited();
             } else {
                 log.warn("秒杀脚本返回未知状态: {}", result);
             }
 
             seckillFailCount.incrementAndGet();
-            return false;
+            recordMetricFailure(failureReason);
+            return SeckillAttemptResult.failure(result, failureReason, failureMessage(result));
         } catch (Exception exception) {
             log.error("秒杀处理异常: userId={}, seckillProductId={}", userId, seckillProductId, exception);
             seckillFailCount.incrementAndGet();
-            return false;
+            recordMetricFailure("exception");
+            return SeckillAttemptResult.failure(
+                    SeckillAttemptResult.EXCEPTION,
+                    "exception",
+                    exception.getMessage() == null ? "Seckill request failed" : exception.getMessage()
+            );
+        } finally {
+            stopMetricTimer(sample);
         }
     }
 
     /**
      * 将秒杀事件写入 Redis Stream 消息队列
      */
+    private String failureReason(Long result) {
+        if (result == null) {
+            return "script_error";
+        }
+        if (result == -1L) {
+            return "duplicate";
+        }
+        if (result == -2L) {
+            return "stock_exhausted";
+        }
+        if (result == -3L) {
+            return "stock_uninitialized";
+        }
+        if (result == -4L) {
+            return "rate_limited";
+        }
+        return "script_error";
+    }
+
+    private String failureMessage(Long result) {
+        if (result == null) {
+            return "Redis Lua script returned no result";
+        }
+        if (result == -1L) {
+            return "Duplicate seckill request";
+        }
+        if (result == -2L) {
+            return "Stock exhausted";
+        }
+        if (result == -3L) {
+            return "Stock is not initialized";
+        }
+        if (result == -4L) {
+            return "Rate limited";
+        }
+        return "Seckill request failed";
+    }
+
+    private void recordMetricRequest() {
+        if (seckillMetricsService != null) {
+            seckillMetricsService.recordRequest();
+        }
+    }
+
+    private Timer.Sample startMetricTimer() {
+        return seckillMetricsService != null ? seckillMetricsService.startTimer() : null;
+    }
+
+    private void stopMetricTimer(Timer.Sample sample) {
+        if (seckillMetricsService != null && sample != null) {
+            seckillMetricsService.stopTimer(sample);
+        }
+    }
+
+    private void recordMetricSuccess() {
+        if (seckillMetricsService != null) {
+            seckillMetricsService.recordSuccess();
+        }
+    }
+
+    private void recordMetricFailure(String reason) {
+        if (seckillMetricsService != null) {
+            seckillMetricsService.recordFailed(reason);
+        }
+    }
+
+    private void recordMetricRateLimited() {
+        if (seckillMetricsService != null) {
+            seckillMetricsService.recordRateLimited();
+        }
+    }
+
+    private void recordMetricLuaError() {
+        if (seckillMetricsService != null) {
+            seckillMetricsService.recordLuaError();
+        }
+    }
+
     private void enqueueOrderEvent(Long userId, Long seckillProductId, Integer quantity) {
         Map<String, String> event = new HashMap<>();
         event.put("userId", String.valueOf(userId));

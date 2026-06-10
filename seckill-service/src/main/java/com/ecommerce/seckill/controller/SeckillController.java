@@ -99,10 +99,18 @@ public class SeckillController {
             fallbackClass = SentinelFallbackHandler.class
     )
     public ResponseEntity<Map<String, Object>> startSeckill(
-            @Parameter(description = "用户ID") @RequestParam Long userId,
+            @RequestHeader(value = "X-Authenticated-User-Id", required = false) Long authenticatedUserId,
+            @Parameter(description = "用户ID") @RequestParam(required = false) Long userId,
             @Parameter(description = "秒杀商品ID") @RequestParam Long seckillProductId,
             @Parameter(description = "抢购数量") @RequestParam(defaultValue = "1") Integer quantity) {
-        boolean success = seckillService.trySeckill(userId, seckillProductId, quantity);
+        Long effectiveUserId = authenticatedUserId != null ? authenticatedUserId : userId;
+        if (effectiveUserId == null) {
+            Map<String, Object> result = new HashMap<>();
+            result.put("success", false);
+            result.put("message", "缺少用户ID");
+            return ResponseEntity.badRequest().body(result);
+        }
+        boolean success = seckillService.trySeckill(effectiveUserId, seckillProductId, quantity);
         Map<String, Object> result = new HashMap<>();
         result.put("success", success);
         result.put("message", success ? "秒杀成功" : "秒杀失败");

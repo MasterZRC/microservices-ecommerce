@@ -113,7 +113,7 @@ class SeckillControllerTest {
         void seckillSuccess_returnsTrue() {
             when(seckillService.trySeckill(100L, 1L, 1)).thenReturn(true);
 
-            ResponseEntity<Map<String, Object>> response = controller.startSeckill(100L, 1L, 1);
+            ResponseEntity<Map<String, Object>> response = controller.startSeckill(null, 100L, 1L, 1);
 
             assertEquals(HttpStatus.OK, response.getStatusCode());
             assertNotNull(response.getBody());
@@ -126,12 +126,26 @@ class SeckillControllerTest {
         void seckillFail_returnsFalse() {
             when(seckillService.trySeckill(100L, 1L, 1)).thenReturn(false);
 
-            ResponseEntity<Map<String, Object>> response = controller.startSeckill(100L, 1L, 1);
+            ResponseEntity<Map<String, Object>> response = controller.startSeckill(null, 100L, 1L, 1);
 
             assertEquals(HttpStatus.OK, response.getStatusCode());
             assertNotNull(response.getBody());
             assertEquals(false, response.getBody().get("success"));
             assertEquals("秒杀失败", response.getBody().get("message"));
+        }
+
+        @Test
+        @DisplayName("认证 Header 存在时应优先使用 Header 用户ID")
+        void authenticatedHeader_takesPrecedenceOverQueryUserId() {
+            when(seckillService.trySeckill(200L, 1L, 1)).thenReturn(true);
+
+            ResponseEntity<Map<String, Object>> response = controller.startSeckill(200L, 100L, 1L, 1);
+
+            assertEquals(HttpStatus.OK, response.getStatusCode());
+            assertNotNull(response.getBody());
+            assertEquals(true, response.getBody().get("success"));
+            verify(seckillService).trySeckill(200L, 1L, 1);
+            verify(seckillService, never()).trySeckill(100L, 1L, 1);
         }
     }
 
