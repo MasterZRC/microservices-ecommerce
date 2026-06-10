@@ -178,7 +178,7 @@ services:
     networks:
       - ecommerce-network
 
-  # AI Agent Service (Python FastAPI + DashScope qwen)
+  # AI Agent Service (Python FastAPI + LLM provider)
   agent-service:
     build:
       context: ./agent-service
@@ -190,8 +190,13 @@ services:
       - "8011:8011"
     environment:
       PYTHONUNBUFFERED: "1"
+      LLM_PROVIDER: ${LLM_PROVIDER:-qwen}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       QWEN_MODEL: ${QWEN_MODEL:-qwen-plus}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_THINKING: ${DEEPSEEK_THINKING:-disabled}
       JWT_SECRET: ${JWT_SECRET}
       PRODUCT_SERVICE_URL: http://product-service:8002
       ORDER_SERVICE_URL: http://order-service:8003
@@ -425,7 +430,7 @@ services:
     networks:
       - ecommerce-network
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80/"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/"]
       interval: 30s
       timeout: 10s
       retries: 3

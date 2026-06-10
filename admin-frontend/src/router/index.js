@@ -8,6 +8,7 @@ import OrderList from '../views/order/OrderList.vue'
 import OrderDetail from '../views/order/OrderDetail.vue'
 import SeckillList from '../views/seckill/SeckillList.vue'
 import SeckillForm from '../views/seckill/SeckillForm.vue'
+import SeckillDemo from '../views/seckill/SeckillDemo.vue'
 import AIInsights from '../views/AIInsights.vue'
 
 const routes = [
@@ -30,6 +31,7 @@ const routes = [
       { path: 'orders', name: 'OrderList', component: OrderList, meta: { title: '订单管理' } },
       { path: 'orders/:id', name: 'OrderDetail', component: OrderDetail, meta: { title: '订单详情' } },
       { path: 'seckill', name: 'SeckillList', component: SeckillList, meta: { title: '秒杀管理' } },
+      { path: 'seckill/demo', name: 'SeckillDemo', component: SeckillDemo, meta: { title: '秒杀压测' } },
       { path: 'seckill/create', name: 'SeckillCreate', component: SeckillForm, meta: { title: '创建秒杀' } },
       { path: 'seckill/edit/:id', name: 'SeckillEdit', component: SeckillForm, meta: { title: '编辑秒杀' } },
       { path: 'ai-insights', name: 'AIInsights', component: AIInsights, meta: { title: 'AI 经营助手' } }

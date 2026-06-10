@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="agent-service", version="1.0.0",
-              description="基于通义千问的双端 AI Agent 微服务")
+              description="双端 AI Agent 微服务")
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,7 +50,8 @@ class ChatRequest(BaseModel):
 async def health() -> Dict[str, Any]:
     return {
         "status": "healthy",
-        "model": config.QWEN_MODEL,
+        "provider": config.LLM_PROVIDER,
+        "model": config.selected_model(),
         "llm_configured": config.is_llm_configured(),
         "version": "1.0.0",
     }

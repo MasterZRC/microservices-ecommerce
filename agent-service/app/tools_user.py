@@ -3,7 +3,7 @@
 设计要点：
 - 工具调用方都是 LLM；schema 必须严谨，参数必填字段不能省。
 - 所有工具都通过 http_client 透传当前用户的 JWT，做到下游服务严格鉴权（不会越权）。
-- 「下单」工具叫 prepare_order_preview：仅返回订单预览 JSON 与 action_card，前端展示后由用户点击「确认下单」按钮才真正调用 /api/order/create。
+- 「下单」工具叫 prepare_order_preview：仅返回订单预览 JSON 与 action_card，前端展示后由用户点击「确认下单」按钮才真正调用订单创建接口。
 """
 from typing import Any, Callable, Dict, List, Optional
 
@@ -38,9 +38,9 @@ def build_user_tools() -> List[Dict[str, Any]]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "product_id": {"type": "integer"},
+                        "product_id": {"type": "integer", "description": "商品 ID；如果不确定不要猜，改用 product_name"},
+                        "product_name": {"type": "string", "description": "商品名称；当用户按名称确认商品时优先传这个字段"},
                     },
-                    "required": ["product_id"],
                 },
             },
         },
@@ -86,10 +86,10 @@ def build_user_tools() -> List[Dict[str, Any]]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "product_id": {"type": "integer"},
+                        "product_id": {"type": "integer", "description": "商品 ID；如果不确定不要猜，改用 product_name"},
+                        "product_name": {"type": "string", "description": "商品名称；当用户按名称确认商品时优先传这个字段"},
                         "quantity": {"type": "integer", "default": 1, "minimum": 1, "maximum": 99},
                     },
-                    "required": ["product_id"],
                 },
             },
         },
@@ -118,10 +118,11 @@ def build_user_tools() -> List[Dict[str, Any]]:
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "product_id": {"type": "integer"},
+                                    "product_id": {"type": "integer", "description": "商品 ID；如果不确定不要猜，改用 product_name"},
+                                    "product_name": {"type": "string", "description": "用户确认购买的商品名称，优先使用这个字段校验商品"},
                                     "quantity": {"type": "integer", "minimum": 1, "maximum": 99},
                                 },
-                                "required": ["product_id", "quantity"],
+                                "required": ["quantity"],
                             },
                         },
                         "receiver_name": {"type": "string", "description": "收货人姓名"},
@@ -181,6 +182,64 @@ def _trim_product(p: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _normalize_name(name: str) -> str:
+    return "".join(str(name or "").lower().split())
+
+
+def _search_product_by_name(product_name: str, *, jwt: str) -> Optional[Dict[str, Any]]:
+    name = (product_name or "").strip()
+    if not name:
+        return None
+    res = call_downstream("GET", f"{config.PRODUCT_SERVICE_URL}/api/product/list",
+                          jwt=jwt, params={"page": 1, "pageSize": 10, "keyword": name})
+    products = (res.get("data") or {}).get("products", [])
+    if not products:
+        return None
+
+    normalized_query = _normalize_name(name)
+    exact = [p for p in products if _normalize_name(p.get("name")) == normalized_query]
+    if exact:
+        return exact[0]
+
+    contains = [
+        p for p in products
+        if normalized_query in _normalize_name(p.get("name")) or _normalize_name(p.get("name")) in normalized_query
+    ]
+    return contains[0] if contains else products[0]
+
+
+def _resolve_product(args: Dict[str, Any], *, jwt: str) -> Dict[str, Any]:
+    """
+    根据商品名或 ID 解析真实商品。商品名优先，避免模型在多轮对话中猜错 product_id。
+    """
+    product_name = (args.get("product_name") or "").strip()
+    if product_name:
+        p = _search_product_by_name(product_name, jwt=jwt)
+        if not p:
+            return {"ok": False, "error": f"没有找到商品：{product_name}"}
+        requested_pid = args.get("product_id")
+        if requested_pid and int(requested_pid) != int(p.get("id")):
+            return {
+                "ok": True,
+                "product": p,
+                "warning": (
+                    f"模型传入的 product_id={requested_pid} 与商品名「{product_name}」不一致，"
+                    f"已按商品名解析为 product_id={p.get('id')}。"
+                ),
+            }
+        return {"ok": True, "product": p}
+
+    if "product_id" not in args or args.get("product_id") in (None, ""):
+        return {"ok": False, "error": "缺少商品名称或商品 ID，无法确认要操作的商品"}
+
+    pid = int(args["product_id"])
+    res = call_downstream("GET", f"{config.PRODUCT_SERVICE_URL}/api/product/{pid}", jwt=jwt)
+    p = res.get("data") or {}
+    if not p.get("id"):
+        return {"ok": False, "error": f"商品 {pid} 不存在"}
+    return {"ok": True, "product": p}
+
+
 def _search_products(args, *, jwt, user_id, sse_emit) -> Dict[str, Any]:
     keyword = (args.get("keyword") or "").strip()
     category_id = args.get("category_id")
@@ -201,12 +260,13 @@ def _search_products(args, *, jwt, user_id, sse_emit) -> Dict[str, Any]:
 
 
 def _get_product_detail(args, *, jwt, user_id, sse_emit) -> Dict[str, Any]:
-    pid = int(args["product_id"])
-    res = call_downstream("GET", f"{config.PRODUCT_SERVICE_URL}/api/product/{pid}", jwt=jwt)
-    product = res.get("data")
-    if not isinstance(product, dict):
-        return {"ok": False, "error": "商品不存在"}
-    return {"ok": True, "product": _trim_product(product)}
+    resolved = _resolve_product(args, jwt=jwt)
+    if not resolved.get("ok"):
+        return resolved
+    data = {"ok": True, "product": _trim_product(resolved["product"])}
+    if resolved.get("warning"):
+        data["warning"] = resolved["warning"]
+    return data
 
 
 def _get_personalized_recommendations(args, *, jwt, user_id, sse_emit) -> Dict[str, Any]:
@@ -236,6 +296,9 @@ def _get_user_profile(args, *, jwt, user_id, sse_emit) -> Dict[str, Any]:
         "GET", f"{config.RECOMMEND_SERVICE_URL}/api/recommendation/profile/{user_id}",
         jwt=jwt,
     )
+    status = res.get("status", 0)
+    if status and status >= 400:
+        return {"ok": False, "error": f"查询用户画像失败 (HTTP {status})"}
     profile = res.get("data") or {}
     if not profile or "message" in profile:
         return {"ok": True, "profile": None, "note": "暂无画像数据（可能是新用户）"}
@@ -243,13 +306,12 @@ def _get_user_profile(args, *, jwt, user_id, sse_emit) -> Dict[str, Any]:
 
 
 def _add_to_cart(args, *, jwt, user_id, sse_emit) -> Dict[str, Any]:
-    pid = int(args["product_id"])
     qty = max(1, min(int(args.get("quantity", 1)), 99))
-    # 先查商品取 name + image
-    detail = call_downstream("GET", f"{config.PRODUCT_SERVICE_URL}/api/product/{pid}", jwt=jwt)
-    p = detail.get("data") or {}
-    if not p.get("id"):
-        return {"ok": False, "error": "商品不存在，无法加购"}
+    resolved = _resolve_product(args, jwt=jwt)
+    if not resolved.get("ok"):
+        return resolved
+    p = resolved["product"]
+    pid = int(p.get("id"))
     body = {
         "userId": user_id,
         "productId": pid,
@@ -260,7 +322,10 @@ def _add_to_cart(args, *, jwt, user_id, sse_emit) -> Dict[str, Any]:
     res = call_downstream("POST", f"{config.ORDER_SERVICE_URL}/api/order/cart/add",
                           jwt=jwt, json_body=body)
     msg = (res.get("data") or {}).get("message", "添加成功")
-    return {"ok": True, "message": msg, "product": _trim_product(p), "quantity": qty}
+    data = {"ok": True, "message": msg, "product": _trim_product(p), "quantity": qty}
+    if resolved.get("warning"):
+        data["warning"] = resolved["warning"]
+    return data
 
 
 def _get_cart(args, *, jwt, user_id, sse_emit) -> Dict[str, Any]:
@@ -300,15 +365,12 @@ def _prepare_order_preview(args, *, jwt, user_id, sse_emit) -> Dict[str, Any]:
     enriched_items: List[Dict[str, Any]] = []
     total_amount = 0.0
     for it in items:
-        pid = int(it.get("product_id"))
         qty = max(1, min(int(it.get("quantity", 1)), 99))
-        try:
-            detail = call_downstream("GET", f"{config.PRODUCT_SERVICE_URL}/api/product/{pid}", jwt=jwt)
-        except Exception as e:
-            return {"ok": False, "error": f"查询商品 {pid} 失败：{e}"}
-        p = detail.get("data") or {}
-        if not p.get("id"):
-            return {"ok": False, "error": f"商品 {pid} 不存在"}
+        resolved = _resolve_product(it, jwt=jwt)
+        if not resolved.get("ok"):
+            return resolved
+        p = resolved["product"]
+        pid = int(p.get("id"))
         price = float(p.get("price") or 0)
         subtotal = round(price * qty, 2)
         total_amount += subtotal
@@ -337,14 +399,14 @@ def _prepare_order_preview(args, *, jwt, user_id, sse_emit) -> Dict[str, Any]:
         "receiver_address": receiver_address,
     }
 
-    # action_card 让前端弹「确认下单」按钮，payload 直接可作为 POST /api/order/create 的 body
+    # action_card 让前端弹「确认下单」按钮；path 使用前端 API base 下的相对路径，避免拼成 /api/api/...
     action = {
         "type": "order_preview",
         "title": "请确认订单后下单",
         "preview": preview,
         "submit": {
             "method": "POST",
-            "path": "/api/order/create",
+            "path": "/order/create",
             "body": {
                 "userId": user_id,
                 "receiverName": receiver_name,
